@@ -1,0 +1,15 @@
+[project]
+name = "telegram-support-bot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "dishka>=1.4.0",
+    "django-environ>=0.11.2",
+    "pydantic>=2.9.2",
+    "pydantic-settings>=2.6.1",
+    "python-telegram-bot>=21.6",
+    "ruff>=0.7.2",
+    "pre-commit>=4.0.1",
+]
