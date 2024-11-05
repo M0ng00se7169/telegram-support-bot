@@ -16,5 +16,5 @@ async def get_all_chats_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=convert_chats_dtos_to_message(chats=chats),
-            parse_mode='MarkdownV2',
+            parse_mode="MarkdownV2",
         )

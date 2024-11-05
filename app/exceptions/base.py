@@ -5,4 +5,4 @@ from dataclasses import dataclass
 class ApplicationException(Exception):
     @property
     def message(self):
-        return 'An error occurred while application was running'
+        return "An error occurred while application was running"

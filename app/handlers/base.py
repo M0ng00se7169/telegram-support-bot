@@ -1,7 +1,6 @@
+from settings import get_settings
 from telegram import Update
 from telegram.ext import ContextTypes
-
-from settings import get_settings
 
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
