@@ -13,6 +13,7 @@ dependencies = [
     "ruff>=0.7.2",
     "pre-commit>=4.0.1",
     "faststream[cli,kafka]>=0.5.28",
+    "watchfiles>=0.24.0",
 ]
 
 [tool.ruff.format]

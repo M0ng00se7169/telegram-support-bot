@@ -5,9 +5,9 @@ from settings import get_settings
 from consumers.handlers import router
 
 
-settings = get_settings()
+def get_app():
+    settings = get_settings()
+    broker = KafkaBroker(settings.KAFKA_BROKER_URL)
+    broker.include_router(router=router)
 
-broker = KafkaBroker(settings.KAFKA_BROKER_URL)
-broker.include_router(router=router)
-
-app = FastStream(broker=broker)
+    return FastStream(broker=broker)

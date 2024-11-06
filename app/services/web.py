@@ -12,10 +12,13 @@ from dtos.messages import (
     ChatListItemDTO,
 )
 from exceptions.chats import (
+    ChatInfoRequestException,
     ChatListRequestException,
-    ListenerListRequestError,
+    ListenerAddRequestException,
+    ListenerListRequestException,
 )
 from services.constants import (
+    CHAT_INFO_URI,
     CHAT_LIST_URI,
     CHAT_LISTENERS_URI,
     DEFAULT_LIMIT,
@@ -38,6 +41,14 @@ class BaseChatWebService(ABC):
 
     @abstractmethod
     async def get_chat_listeners(self, chat_oid: str) -> list[ChatListenerDTO]:
+        ...
+
+    @abstractmethod
+    async def add_listener(self, telegram_chat_id: int, chat_oid: str):
+        ...
+
+    @abstractmethod
+    async def get_chat_info(self, chat_oid: str) -> ChatListItemDTO:
         ...
 
 
@@ -65,7 +76,7 @@ class ChatWebService(BaseChatWebService):
             url=urljoin(base=self.base_url, url=CHAT_LISTENERS_URI.format(chat_oid=chat_oid)),
         )
         if not response.is_success:
-            raise ListenerListRequestError(
+            raise ListenerListRequestException(
                 status_code=response.status_code,
                 response_content=response.content.decode(),
             )
@@ -77,3 +88,32 @@ class ChatWebService(BaseChatWebService):
                 listener_data=listener_data,
             ) for listener_data in json_data
         ]
+
+    async def add_listener(self, telegram_chat_id: int, chat_oid: str) -> None:
+        response = await self.http_client.post(
+            url=urljoin(
+                base=self.base_url,
+                url=CHAT_LISTENERS_URI.format(chat_oid=chat_oid),
+            ),
+            json={'telegram_chat_id': str(telegram_chat_id)},
+        )
+        if not response.is_success:
+            raise ListenerAddRequestException(
+                status_code=response.status_code,
+                response_content=response.content.decode(),
+            )
+
+    async def get_chat_info(self, chat_oid: str) -> ChatListItemDTO:
+        response = await self.http_client.get(
+            url=urljoin(
+                base=self.base_url,
+                url=CHAT_INFO_URI.format(chat_oid=chat_oid),
+            ),
+        )
+        if not response.is_success:
+            raise ChatInfoRequestException(
+                status_code=response.status_code,
+                response_content=response.content.decode(),
+            )
+
+        return convert_chat_response_to_chat_dto(chat_data=response.json())

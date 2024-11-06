@@ -5,7 +5,11 @@ from telegram.ext import (
 )
 
 from handlers.base import start_handler
-from handlers.chats import get_all_chats_handler
+from handlers.chats import (
+    get_all_chats_handler,
+    set_chat_listener,
+)
+from handlers.errors import error_handler
 
 
 def get_app():
@@ -14,9 +18,12 @@ def get_app():
 
     start_command_handler = CommandHandler("start", start_handler)
     get_all_chats_command_handler = CommandHandler("chats", get_all_chats_handler)
+    set_chat_listener_handler = CommandHandler('set_chat', set_chat_listener)
 
     application.add_handler(start_command_handler)
     application.add_handler(get_all_chats_command_handler)
+    application.add_handler(set_chat_listener_handler)
+    application.add_error_handler(error_handler, block=True)
 
     print("bot started")
 
