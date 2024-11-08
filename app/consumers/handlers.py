@@ -30,7 +30,7 @@ async def new_message_subscription_handler(
             await bot.send_message(
                 chat_id=listener.oid,
                 text=(
-                    f'Message from chat <b>{chat_info.title}</b> (<code>{chat_info.oid}</code>)'
+                    f'Message from chat <b>{chat_info.oid}</b> (<code>{chat_info.title}</code>)'
                     f'<blockquote>{message.message_text}</blockquote>'
                 ),
                 parse_mode='HTML',
