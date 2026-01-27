@@ -10,8 +10,8 @@ from telegram import Bot
 
 from settings import ProjectSettings
 from services.web import (
-	BaseChatWebService,
-	ChatWebService,
+	BaseChatDirectory,
+	ChatDirectory,
 )
 
 
@@ -26,12 +26,12 @@ class DefaultProvider(Provider):
 			yield http_client
 
 	@provide(scope=Scope.REQUEST)
-	def get_chat_web_service(
+	def get_chat_directory(
 		self,
 		http_client: AsyncClient,
 		settings: ProjectSettings,
-	) -> BaseChatWebService:
-		return ChatWebService(
+	) -> BaseChatDirectory:
+		return ChatDirectory(
 			http_client=http_client,
 			base_url=settings.WEB_API_BASE_URL,
 		)
