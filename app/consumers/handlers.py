@@ -7,6 +7,7 @@ from settings import get_settings
 from telegram import Bot
 
 from consumers.schemas import NewChatMessageSchema
+from services.replies import BaseReplyRegistry
 from services.web import BaseChatDirectory
 
 
@@ -20,20 +21,25 @@ async def new_message_subscription_handler(
 	message: NewChatMessageSchema,
 	directory: FromDishka[BaseChatDirectory],
 	bot: FromDishka[Bot],
+	reply_registry: FromDishka[BaseReplyRegistry],
 ):
-	# Kafka key продюсера содержит event_id, а не chat_oid, поэтому запрос по
-	# key.decode() уходил в 404 и ронял всю обработку события.
+	# Реальный продюсер кладёт в key event_id, а не chat_oid:
+	# единственный надёжный источник chat_oid — payload события.
 	chat_oid = message.chat_oid
 
 	listeners = await directory.get_chat_listeners(chat_oid=chat_oid)
 	chat_info = await directory.get_chat_info(chat_oid=chat_oid)
 
 	for listener in listeners:
-		await bot.send_message(
+		sent_message = await bot.send_message(
 			chat_id=listener.oid,
 			text=(
 				f'New message in chat <b>{chat_info.title}</b>'
 				f'<blockquote>{message.message_text}</blockquote>'
 			),
 			parse_mode='HTML',
+		)
+		await reply_registry.remember(
+			message_id=sent_message.message_id,
+			chat_oid=chat_oid,
 		)

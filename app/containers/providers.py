@@ -7,8 +7,10 @@ from dishka import (
 )
 from httpx import AsyncClient
 from telegram import Bot
+from valkey.asyncio import ConnectionPool, Valkey
 
 from settings import ProjectSettings
+from services.replies import BaseReplyRegistry, ValkeyReplyRegistry
 from services.web import (
 	BaseChatDirectory,
 	ChatDirectory,
@@ -25,6 +27,29 @@ class DefaultProvider(Provider):
 		async with AsyncClient() as http_client:
 			yield http_client
 
+	@provide(scope=Scope.APP)
+	async def get_telegram_bot(self, settings: ProjectSettings) -> AsyncIterator[Bot]:
+		bot = Bot(token=settings.TG_BOT_TOKEN)
+		await bot.initialize()
+		try:
+			yield bot
+		finally:
+			await bot.shutdown()
+
+	@provide(scope=Scope.APP)
+	async def get_valkey_pool(
+		self, settings: ProjectSettings
+	) -> AsyncIterator[ConnectionPool]:
+		pool = ConnectionPool.from_url(url=settings.VALKEY_URL)
+		try:
+			yield pool
+		finally:
+			await pool.disconnect()
+
+	@provide(scope=Scope.APP)
+	def get_reply_registry(self, pool: ConnectionPool) -> BaseReplyRegistry:
+		return ValkeyReplyRegistry(client=Valkey(connection_pool=pool))
+
 	@provide(scope=Scope.REQUEST)
 	def get_chat_directory(
 		self,
@@ -35,12 +60,3 @@ class DefaultProvider(Provider):
 			http_client=http_client,
 			base_url=settings.WEB_API_BASE_URL,
 		)
-
-	@provide(scope=Scope.APP)
-	async def get_telegram_bot(self, settings: ProjectSettings) -> AsyncIterator[Bot]:
-		bot = Bot(token=settings.TG_BOT_TOKEN)
-		await bot.initialize()
-		try:
-			yield bot
-		finally:
-			await bot.shutdown()

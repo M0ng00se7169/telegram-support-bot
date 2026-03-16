@@ -1,11 +1,10 @@
-import re
-
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from handlers.constants import SEND_MESSAGE_STATE
 from handlers.converters.chats import convert_chats_dtos_to_message
-from services.web import BaseChatWebService
+from services.replies import BaseReplyRegistry
+from services.web import BaseChatDirectory
 
 
 def _request_scope(context: ContextTypes.DEFAULT_TYPE):
@@ -15,8 +14,8 @@ def _request_scope(context: ContextTypes.DEFAULT_TYPE):
 
 async def get_all_chats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 	async with _request_scope(context) as request_container:
-		service = await request_container.get(BaseChatWebService)  # type: ignore
-		chats = await service.get_all_chats()
+		directory = await request_container.get(BaseChatDirectory)
+		chats = await directory.get_all_chats()
 
 		await context.bot.send_message(
 			chat_id=update.effective_chat.id,
@@ -27,8 +26,8 @@ async def get_all_chats_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def set_chat_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 	async with _request_scope(context) as request_container:
-		service = await request_container.get(BaseChatWebService)  # type: ignore
-		await service.add_listener(
+		directory = await request_container.get(BaseChatDirectory)
+		await directory.add_listener(
 			telegram_chat_id=update.effective_chat.id,
 			chat_oid=context.args[0],
 		)
@@ -67,20 +66,23 @@ async def send_message_to_chat(update: Update, context: ContextTypes.DEFAULT_TYP
 		)
 		return
 
-	# TODO: разбор chat_oid из текста уведомления унести в отдельный модуль -
-	# формат уведомления сейчас протекает сюда из consumer'а.
-	try:
-		# TODO: сделать паттерн под UUID4
-		chat_oid = re.findall(r'\s{1}\(.+\)', update.message.reply_to_message.text)[0].replace(
-			' ', '',
-		).replace('(', '').replace(')', '')
-	except IndexError:
+	async with _request_scope(context) as request_container:
+		reply_registry = await request_container.get(BaseReplyRegistry)
+		chat_oid = await reply_registry.resolve(
+			update.message.reply_to_message.message_id
+		)
+
+	if chat_oid is None:
 		await context.bot.send_message(
 			chat_id=update.effective_chat.id,  # type: ignore
-			text='Необходимо ответить именно на сообщение пользователя.',
+			text=(
+				'Please reply to a chat notification (or the record has expired).'
+				'Reply to the bot message about a new chat message.'
+			),
 		)
 		return
 
+	# Доставка reply в чат — следующая карточка; chat_oid подтверждён реестром.
 	await context.bot.send_message(
 		chat_id=update.effective_chat.id,  # type: ignore
 		text=f'Reply accepted for chat {chat_oid}.',
