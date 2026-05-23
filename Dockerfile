@@ -1,11 +1,11 @@
-FROM python:3.12.1-slim-bullseye as builder
+FROM python:3.12-slim-bookworm as builder
 
 COPY uv.lock pyproject.toml ./
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-RUN uv pip compile pyproject.toml -o requirements.txt
+RUN uv export --no-dev --no-hashes --no-emit-project -o requirements.txt
 
-FROM python:3.12.1-slim-bullseye as dev
+FROM python:3.12-slim-bookworm as dev
 
 WORKDIR /app
 
