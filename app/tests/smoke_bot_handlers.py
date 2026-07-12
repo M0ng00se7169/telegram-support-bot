@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import os
+import re
 
 os.environ.setdefault('TG_BOT_TOKEN', '123456:TEST-TOKEN')
 
@@ -25,6 +26,31 @@ import httpx  # noqa: E402
 import telegram  # noqa: E402
 
 _sent_messages = []
+
+# Символы, которые Telegram считает зарезервированными в MarkdownV2.
+# Ищем незаэкранированные вхождения: перед символом не должно быть слэша.
+_UNESCAPED_RESERVED = re.compile(r'(?<!\\)[_*\[\]()~`>#+\-=|{}.!]')
+_CODE_SPAN = re.compile(r'`(?:\\.|[^`\\])*`')
+# Наша собственная разметка: `*bold*`, `*italic*`, `_italic_`.
+# Данные экранируются, поэтому неэкранированные `*` и `_` — только маркеры.
+_OWN_MARKUP = re.compile(r'(?<!\\)[*_]')
+
+
+def assert_valid_markdownv2(text: str) -> None:
+	"""Telegram отклоняет сообщение с незаэкранированными зарезервированными
+	символами MarkdownV2. PTB v21 не умеет парсить entities локально, поэтому
+	проверяем инвариант вручную:
+
+	- внутри `code` зарезервированы только слэш и кавычка — вырезаем такие
+	  фрагменты целиком, они не должны валить сообщение;
+	- неэкранированные `*` и `_` вне `code` — это наша разметка, убираем её;
+	- всё остальное обязано быть экранировано.
+	"""
+	without_code = _CODE_SPAN.sub('', text)
+	without_markup = _OWN_MARKUP.sub('', without_code)
+	assert not _UNESCAPED_RESERVED.findall(
+		without_markup
+	), f'unescaped MarkdownV2 reserved chars in {without_markup!r} (full: {text!r})'
 
 
 async def _stub(self) -> None:  # noqa: ANN001
@@ -57,8 +83,8 @@ class _OfflineProvider(Provider):
 		def transport_handler(request: httpx.Request) -> Response:
 			path = request.url.path
 			chat = {
-				'oid': 'chat-oid',
-				'title': 'chat title',
+				'oid': '3f2b1c8e-5a4d-4b7c-9e10-2d3f4a5b6c7d',
+				'title': 'route 77 — problem (login) #1_ok',
 				'created_at': '2026-01-01T00:00:00Z',
 			}
 			if path.endswith('/listeners/'):
@@ -105,9 +131,19 @@ async def main() -> None:
 
 	assert len(_sent_messages) == 1, f'expected 1 message, sent {_sent_messages}'
 	assert _sent_messages[0]['chat_id'] == 12345
+	assert _sent_messages[0]['parse_mode'] == 'MarkdownV2', _sent_messages[0]
 	message_text = _sent_messages[0]['text']
-	assert message_text.startswith('List of all available chats:'), message_text
-	assert 'ChatOID: `chat-oid`' in message_text, message_text
+	assert message_text.startswith('*List of all available chats:*'), message_text
+
+	# Регрессия: oid и title приходят из Web API и содержат символы,
+	# зарезервированные MarkdownV2 ('-', '.', '(', ')', '#', '_', '!'),
+	# из-за чего Telegram отвечал BadRequest "Can't parse entities".
+	# Внутри `code` экранируется только слэш и кавычка, поэтому UUID
+	# должен остаться читаемым, без слэшей перед дефисами.
+	assert '`3f2b1c8e-5a4d-4b7c-9e10-2d3f4a5b6c7d`' in message_text, message_text
+	assert r'*route 77 — problem \(login\) \#1\_ok*' in message_text, message_text
+
+	assert_valid_markdownv2(message_text)
 
 	await factories._container.close()
 	print('BOT_HANDLERS_OK')

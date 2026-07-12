@@ -34,7 +34,6 @@ async def set_chat_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 		await context.bot.send_message(
 			chat_id=update.effective_chat.id,  # type: ignore
 			text='You connected to the chat.',
-			parse_mode='MarkdownV2',
 		)
 
 
@@ -54,7 +53,6 @@ async def quit_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 	await context.bot.send_message(
 		chat_id=update.effective_chat.id,
 		text='You quited from the dialogue with client',
-		parse_mode='MarkdownV2',
 	)
 
 
