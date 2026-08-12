@@ -4,8 +4,8 @@ Covers the composition-root wiring that the Kafka smoke does not:
 - get_app() must store the process container in application.bot_data['container'];
 - a PTB handler opens a REQUEST scope via handlers.chats._request_scope and
   resolves BaseChatDirectory from it;
-- no network: httpx MockTransport serves canned API responses, PTB Bot
-  lifecycle hooks and send_message are stubbed.
+- no network: httpx MockTransport serves canned API responses, настоящий
+  PTB Bot говорит через заглушку транспорта Telegram (tests/telegram_transport.py).
 
 Run:  python tests/smoke_bot_handlers.py   (from the app/ directory)
 """
@@ -13,19 +13,21 @@ Run:  python tests/smoke_bot_handlers.py   (from the app/ directory)
 import sys
 from pathlib import Path
 
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import os
 import re
+
 
 os.environ.setdefault('TG_BOT_TOKEN', '123456:TEST-TOKEN')
 
 import asyncio  # noqa: E402
 
 import httpx  # noqa: E402
-import telegram  # noqa: E402
+from telegram_transport import OfflineTelegramTransport  # noqa: E402
 
-_sent_messages = []
 
 # Символы, которые Telegram считает зарезервированными в MarkdownV2.
 # Ищем незаэкранированные вхождения: перед символом не должно быть слэша.
@@ -49,29 +51,21 @@ def assert_valid_markdownv2(text: str) -> None:
 	without_code = _CODE_SPAN.sub('', text)
 	without_markup = _OWN_MARKUP.sub('', without_code)
 	assert not _UNESCAPED_RESERVED.findall(
-		without_markup
+		without_markup,
 	), f'unescaped MarkdownV2 reserved chars in {without_markup!r} (full: {text!r})'
 
 
-async def _stub(self) -> None:  # noqa: ANN001
-	pass
-
-
-async def _fake_send(self, **kwargs):  # noqa: ANN001
-	_sent_messages.append(kwargs)
-
-
-telegram.Bot.initialize = _stub
-telegram.Bot.shutdown = _stub
-telegram.Bot.send_message = _fake_send
-
 from dishka import (  # noqa: E402
-	Provider,
-	Scope,
-	make_async_container,
-	provide,
+    make_async_container,
+    provide,
+    Provider,
+    Scope,
 )
-from httpx import AsyncClient, MockTransport, Response  # noqa: E402
+from httpx import (  # noqa: E402
+    AsyncClient,
+    MockTransport,
+    Response,
+)
 
 import containers.factories as factories  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
@@ -111,13 +105,15 @@ class _FakeContext:
 
 
 async def main() -> None:
+	transport = OfflineTelegramTransport()
+
 	# Pre-seed the process-singleton container so that get_app() composes
 	# exactly what the bot handlers will see at runtime.
 	factories._container = make_async_container(DefaultProvider(), _OfflineProvider())
 
 	from main import get_app
 
-	application = get_app()
+	application = get_app(request=transport)
 
 	container = application.bot_data.get('container')
 	assert container is not None, 'bot_data["container"] must be set by get_app()'
@@ -129,10 +125,11 @@ async def main() -> None:
 
 	await get_all_chats_handler(_FakeUpdate(), fake_context)
 
-	assert len(_sent_messages) == 1, f'expected 1 message, sent {_sent_messages}'
-	assert _sent_messages[0]['chat_id'] == 12345
-	assert _sent_messages[0]['parse_mode'] == 'MarkdownV2', _sent_messages[0]
-	message_text = _sent_messages[0]['text']
+	sent_messages = transport.sent_messages
+	assert len(sent_messages) == 1, f'expected 1 message, sent {sent_messages}'
+	assert sent_messages[0]['chat_id'] == 12345
+	assert sent_messages[0]['parse_mode'] == 'MarkdownV2', sent_messages[0]
+	message_text = sent_messages[0]['text']
 	assert message_text.startswith('*List of all available chats:*'), message_text
 
 	# Регрессия: oid и title приходят из Web API и содержат символы,

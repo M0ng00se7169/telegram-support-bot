@@ -1,38 +1,40 @@
 from settings import get_settings
 from telegram.ext import (
-	ApplicationBuilder,
-	CommandHandler,
-	ConversationHandler,
-	filters,
-	MessageHandler,
+    ApplicationBuilder,
+    CommandHandler,
+    ConversationHandler,
+    filters,
+    MessageHandler,
 )
+from telegram.request import BaseRequest
 
 from containers.factories import get_container
 from handlers.base import start_handler
 from handlers.chats import (
-	get_all_chats_handler,
-	quit_chat,
-	send_message_to_chat,
-	set_chat_listener,
-	start_dialog,
+    get_all_chats_handler,
+    quit_chat,
+    send_message_to_chat,
+    set_chat_listener,
+    start_dialog,
 )
 from handlers.constants import SEND_MESSAGE_STATE
 from handlers.errors import error_handler
 
 
-def get_app():
+def get_app(request: BaseRequest | None = None):
 	settings = get_settings()
 	container = get_container()
 
 	async def close_container(_application):
 		await container.close()
 
-	application = (
-		ApplicationBuilder()
-		.token(token=settings.TG_BOT_TOKEN)
-		.post_shutdown(close_container)
-		.build()
-	)
+	builder = ApplicationBuilder().token(token=settings.TG_BOT_TOKEN)
+	# Необязательный крючок: офлайн-смоуки подставляют заглушку транспорта Telegram,
+	# чтобы настоящий Bot работал без сети. Без аргумента поведение прежнее.
+	if request is not None:
+		builder = builder.request(request)
+
+	application = builder.post_shutdown(close_container).build()
 	application.bot_data['container'] = container
 
 	start_command_handler = CommandHandler('start', start_handler)
