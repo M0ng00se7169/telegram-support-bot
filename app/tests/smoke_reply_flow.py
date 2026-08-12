@@ -30,34 +30,34 @@ import asyncio  # noqa: E402
 import httpx  # noqa: E402
 import telegram  # noqa: E402
 from dishka import (  # noqa: E402
-    make_async_container,
-    provide,
-    Provider,
-    Scope,
+	make_async_container,
+	provide,
+	Provider,
+	Scope,
 )
 from dishka.integrations.faststream import setup_dishka  # noqa: E402
 from faststream import FastStream  # noqa: E402
 from faststream.kafka import (  # noqa: E402
-    KafkaBroker,
-    TestKafkaBroker,
+	KafkaBroker,
+	TestKafkaBroker,
 )
 from httpx import (  # noqa: E402
-    AsyncClient,
-    MockTransport,
-    Response,
+	AsyncClient,
+	MockTransport,
+	Response,
 )
 from settings import get_settings  # noqa: E402
 from telegram_transport import (  # noqa: E402
-    offline_telegram_provider,
-    OfflineTelegramTransport,
+	offline_telegram_provider,
+	OfflineTelegramTransport,
 )
 
 import containers.factories as factories  # noqa: E402
 from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
 from services.replies import (  # noqa: E402
-    BaseReplyRegistry,
-    InMemoryReplyRegistry,
+	BaseReplyRegistry,
+	InMemoryReplyRegistry,
 )
 
 
@@ -168,7 +168,8 @@ async def main() -> None:
 	assert 'choose the message' in transport.sent_messages[-1]['text']
 
 	await send_message_to_chat(
-		_FakeUpdate(reply_to=_message(notification_message_id)), context,
+		_FakeUpdate(reply_to=_message(notification_message_id)),
+		context,
 	)
 	ack = transport.sent_messages[-1]
 	assert ack['chat_id'] == 12345

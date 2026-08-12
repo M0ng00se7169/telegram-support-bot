@@ -1,21 +1,21 @@
 from settings import get_settings
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ConversationHandler,
-    filters,
-    MessageHandler,
+	ApplicationBuilder,
+	CommandHandler,
+	ConversationHandler,
+	filters,
+	MessageHandler,
 )
 from telegram.request import BaseRequest
 
 from containers.factories import get_container
 from handlers.base import start_handler
 from handlers.chats import (
-    get_all_chats_handler,
-    quit_chat,
-    send_message_to_chat,
-    set_chat_listener,
-    start_dialog,
+	get_all_chats_handler,
+	quit_chat,
+	send_message_to_chat,
+	set_chat_listener,
+	start_dialog,
 )
 from handlers.constants import SEND_MESSAGE_STATE
 from handlers.errors import error_handler
@@ -32,7 +32,9 @@ def get_app(request: BaseRequest | None = None):
 	# Необязательный крючок: офлайн-смоуки подставляют заглушку транспорта Telegram,
 	# чтобы настоящий Bot работал без сети. Без аргумента поведение прежнее.
 	if request is not None:
-		builder = builder.request(request)
+		# Оба канала Bot получают одну заглушку: канал getUpdates иначе остался бы
+		# реальным HTTPXRequest и увёл бы смоук в сеть.
+		builder = builder.request(request).get_updates_request(request)
 
 	application = builder.post_shutdown(close_container).build()
 	application.bot_data['container'] = container

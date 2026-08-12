@@ -56,15 +56,15 @@ def assert_valid_markdownv2(text: str) -> None:
 
 
 from dishka import (  # noqa: E402
-    make_async_container,
-    provide,
-    Provider,
-    Scope,
+	make_async_container,
+	provide,
+	Provider,
+	Scope,
 )
 from httpx import (  # noqa: E402
-    AsyncClient,
-    MockTransport,
-    Response,
+	AsyncClient,
+	MockTransport,
+	Response,
 )
 
 import containers.factories as factories  # noqa: E402

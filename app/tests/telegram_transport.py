@@ -11,21 +11,21 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import (
-    datetime,
-    UTC,
+	datetime,
+	UTC,
 )
 from typing import Any
 
 from dishka import (
-    provide,
-    Provider,
-    Scope,
+	provide,
+	Provider,
+	Scope,
 )
 from settings import ProjectSettings
 from telegram import Bot
 from telegram.request import (
-    BaseRequest,
-    RequestData,
+	BaseRequest,
+	RequestData,
 )
 
 
@@ -103,7 +103,9 @@ class OfflineTelegramTransport(BaseRequest):
 		return 200, json.dumps({'ok': True, 'result': result}).encode()
 
 	def _result(
-		self, method: str, parameters: dict[str, Any],
+		self,
+		method: str,
+		parameters: dict[str, Any],
 	) -> dict[str, Any]:
 		if method == 'getMe':
 			# `Bot.initialize()` проверяет токен через getMe; без валидного User
@@ -134,7 +136,8 @@ def offline_telegram_provider(transport: OfflineTelegramTransport) -> Provider:
 	class _OfflineTelegramProvider(Provider):
 		@provide(scope=Scope.APP)
 		async def get_telegram_bot(
-			self, settings: ProjectSettings,
+			self,
+			settings: ProjectSettings,
 		) -> AsyncIterator[Bot]:
 			bot = Bot(
 				token=settings.TG_BOT_TOKEN,

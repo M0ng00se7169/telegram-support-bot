@@ -20,33 +20,33 @@ import asyncio  # noqa: E402
 
 import httpx  # noqa: E402
 from dishka import (  # noqa: E402
-    make_async_container,
-    provide,
-    Provider,
-    Scope,
+	make_async_container,
+	provide,
+	Provider,
+	Scope,
 )
 from dishka.integrations.faststream import setup_dishka  # noqa: E402
 from faststream import FastStream  # noqa: E402
 from faststream.kafka import (  # noqa: E402
-    KafkaBroker,
-    TestKafkaBroker,
+	KafkaBroker,
+	TestKafkaBroker,
 )
 from httpx import (  # noqa: E402
-    AsyncClient,
-    MockTransport,
-    Response,
+	AsyncClient,
+	MockTransport,
+	Response,
 )
 from settings import get_settings  # noqa: E402
 from telegram_transport import (  # noqa: E402
-    offline_telegram_provider,
-    OfflineTelegramTransport,
+	offline_telegram_provider,
+	OfflineTelegramTransport,
 )
 
 from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
 from services.replies import (  # noqa: E402
-    BaseReplyRegistry,
-    InMemoryReplyRegistry,
+	BaseReplyRegistry,
+	InMemoryReplyRegistry,
 )
 
 
