@@ -62,7 +62,7 @@ from services.replies import (  # noqa: E402
 
 
 CHAT_OID = 'chat-oid-9c'
-# Заголовок и текст набиты спецсимволами HTML (<, >, &) - до билет�� Telegram
+# Заголовок и текст набиты спецсимволами HTML (<, >, &) - до билета Telegram
 # отвечал BadRequest "Can't parse entities", потому что заголовок не экранировался.
 HOSTILE_TITLE = 'Отдел «Продажи» <MVP> & Co — отчёт #1.2'
 HOSTILE_TEXT = 'клиент пишет: 5 < 7 && 7 > 5, "цитаты" тоже'
