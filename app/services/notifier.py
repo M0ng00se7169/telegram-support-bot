@@ -23,12 +23,17 @@ from telegram import Bot
 from dtos.messages import ChatListItemDTO
 from services.replies import BaseReplyRegistry
 
+# Bot API принимает адресата и как `int`, и как `str`: у групп и каналов id
+# отрицательный, а каналы адресуются `@username`. Источники в проекте тоже
+# разные: Web API отдаёт Chat Listener как строку, PTB отдаёт id апдейта как int.
+TelegramAddress = int | str
+
 
 class BaseNotifier(ABC):
 	@abstractmethod
 	async def notify_new_message(
 		self,
-		tg_chat_id: str,
+		tg_chat_id: TelegramAddress,
 		chat_oid: str,
 		title: str,
 		text: str,
@@ -37,12 +42,12 @@ class BaseNotifier(ABC):
 	@abstractmethod
 	async def notify_chat_list(
 		self,
-		tg_chat_id: int,
+		tg_chat_id: TelegramAddress,
 		chats: Sequence[ChatListItemDTO],
 	) -> None: ...
 
 	@abstractmethod
-	async def acknowledge(self, tg_chat_id: int, text: str) -> None: ...
+	async def acknowledge(self, tg_chat_id: TelegramAddress, text: str) -> None: ...
 
 
 @dataclass
@@ -54,7 +59,7 @@ class TelegramNotifier(BaseNotifier):
 
 	async def notify_new_message(
 		self,
-		tg_chat_id: str,
+		tg_chat_id: TelegramAddress,
 		chat_oid: str,
 		title: str,
 		text: str,
@@ -80,10 +85,10 @@ class TelegramNotifier(BaseNotifier):
 
 	async def notify_chat_list(
 		self,
-		tg_chat_id: int,
+		tg_chat_id: TelegramAddress,
 		chats: Sequence[ChatListItemDTO],
 	) -> None:
-		raise NotImplementedError
+		raise NotImplementedError('операция «показать список чатов» ещё не реализована')
 
-	async def acknowledge(self, tg_chat_id: int, text: str) -> None:
-		raise NotImplementedError
+	async def acknowledge(self, tg_chat_id: TelegramAddress, text: str) -> None:
+		raise NotImplementedError('операция «подтвердить действие» ещё не реализована')

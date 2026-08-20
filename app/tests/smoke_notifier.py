@@ -54,7 +54,10 @@ from telegram_transport import (  # noqa: E402
 
 from containers.providers import DefaultProvider  # noqa: E402
 from dtos.messages import ChatListItemDTO  # noqa: E402
-from services.notifier import BaseNotifier  # noqa: E402
+from services.notifier import (  # noqa: E402
+	BaseNotifier,
+	TelegramAddress,
+)
 from services.replies import (  # noqa: E402
 	BaseReplyRegistry,
 	InMemoryReplyRegistry,
@@ -94,7 +97,7 @@ class _RecordingNotifier(BaseNotifier):
 
 	async def notify_new_message(
 		self,
-		tg_chat_id: str,
+		tg_chat_id: TelegramAddress,
 		chat_oid: str,
 		title: str,
 		text: str,
@@ -110,12 +113,12 @@ class _RecordingNotifier(BaseNotifier):
 
 	async def notify_chat_list(
 		self,
-		tg_chat_id: int,
+		tg_chat_id: TelegramAddress,
 		chats: Sequence[ChatListItemDTO],
 	) -> None:
 		raise AssertionError('операция «показать список чатов» вне этого билета')
 
-	async def acknowledge(self, tg_chat_id: int, text: str) -> None:
+	async def acknowledge(self, tg_chat_id: TelegramAddress, text: str) -> None:
 		raise AssertionError('операция «подтвердить действие» вне этого билета')
 
 
