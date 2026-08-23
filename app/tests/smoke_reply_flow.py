@@ -165,7 +165,9 @@ async def main() -> None:
 	from handlers.chats import send_message_to_chat
 
 	await send_message_to_chat(_FakeUpdate(reply_to=None), context)
-	assert 'choose the message' in transport.sent_messages[-1]['text']
+	missing_reply_ack = transport.sent_messages[-1]
+	assert 'choose the message' in missing_reply_ack['text']
+	assert missing_reply_ack.get('parse_mode') is None, missing_reply_ack
 
 	await send_message_to_chat(
 		_FakeUpdate(reply_to=_message(notification_message_id)),
@@ -174,11 +176,13 @@ async def main() -> None:
 	ack = transport.sent_messages[-1]
 	assert ack['chat_id'] == 12345
 	assert CHAT_OID in ack['text'], ack
+	assert ack.get('parse_mode') is None, ack
 
 	# --- Reply target unknown to the registry (expired / foreign). ---
 	await send_message_to_chat(_FakeUpdate(reply_to=_message(424_242)), context)
 	warning = transport.sent_messages[-1]
 	assert warning['text'].startswith('Please reply to a chat notification'), warning
+	assert warning.get('parse_mode') is None, warning
 
 	await container.close()
 	print('REPLY_FLOW_SMOKE_OK')

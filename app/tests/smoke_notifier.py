@@ -10,6 +10,10 @@ Two independent seams, both offline (no Telegram API, no Kafka, no Web API):
    (tests/telegram_transport.py): what actually goes to Telegram is escaped per
    the format chosen inside the module, and the (tg_message_id -> chat_oid) pair
    lands in the Reply Registry after a successful send.
+3. The bot-side operations of the same module: the chat list is rendered and
+   escaped as MarkdownV2 inside the module (a title full of reserved characters
+   cannot break it, and the chat oid stays readable inside a code span), while
+   a confirmation goes out as plain text with no parse_mode at all.
 
 Run:  python tests/smoke_notifier.py   (from the app/ directory)
 """
@@ -29,6 +33,7 @@ from dataclasses import (  # noqa: E402
 )
 
 import httpx  # noqa: E402
+from markdown_v2 import assert_valid_markdownv2  # noqa: E402
 from dishka import (  # noqa: E402
 	make_async_container,
 	provide,
@@ -69,6 +74,17 @@ CHAT_OID = 'chat-oid-9c'
 # отвечал BadRequest "Can't parse entities", потому что заголовок не экранировался.
 HOSTILE_TITLE = 'Отдел «Продажи» <MVP> & Co — отчёт #1.2'
 HOSTILE_TEXT = 'клиент пишет: 5 < 7 && 7 > 5, "цитаты" тоже'
+
+# Для MarkdownV2 набор зарезервированных символов другой: \_*[]()~`>#+-=|{}.!
+# (у HTML-символов `&` среди них нет). Ожидаемое сообщение выписано руками по
+# спецификации Telegram, а не пересчитано тем же хелпером, что и реализация.
+MARKDOWN_HOSTILE_TITLE = r'a&b\_c*d[e]f(g)h~i`j>k#l+m-n=o|p{q}r.s!t'
+MARKDOWN_ESCAPED_TITLE = r'a&b\\\_c\*d\[e\]f\(g\)h\~i\`j\>k\#l\+m\-n\=o\|p\{q\}r\.s\!t'
+MARKDOWN_CHAT_OID = '3f2b1c8e-5a4d-4b7c-9e10-2d3f4a5b6c7d'
+# Внутри `code` зарезервированы только обратный слэш и кавычка, поэтому дефисы и
+# точка UUID остаются читаемыми, а кавычка экранируется.
+MARKDOWN_ODD_OID = r'a\b`c-d.e'
+MARKDOWN_ODD_OID_ESCAPED = r'a\\b\`c-d.e'
 
 _EVENT = {
 	'event_id': 'e-notifier',
@@ -227,6 +243,88 @@ async def _smoke_real_notifier_over_transport(
 	await container.close()
 
 
+async def _bot_side_notifier():
+	"""Настоящий Notifier, говорящий через офлайн-транспорт Telegram."""
+	transport = OfflineTelegramTransport()
+	container = make_async_container(
+		DefaultProvider(),
+		offline_telegram_provider(transport),
+	)
+	notifier = await container.get(BaseNotifier)
+	return notifier, transport, container
+
+
+async def _smoke_chat_list_over_transport() -> None:
+	"""Список чатов: MarkdownV2 собирается и экранируется внутри модуля."""
+	notifier, transport, container = await _bot_side_notifier()
+
+	try:
+		chats = [
+			ChatListItemDTO(
+				oid=MARKDOWN_CHAT_OID,
+				title=MARKDOWN_HOSTILE_TITLE,
+				created_at='2026-01-01T00:00:00Z',
+			),
+			ChatListItemDTO(
+				oid=MARKDOWN_ODD_OID,
+				title='(пустой) заголовок',
+				created_at='2026-01-01T00:00:00Z',
+			),
+		]
+		await notifier.notify_chat_list(tg_chat_id=12345, chats=chats)
+
+		assert len(transport.sent_messages) == 1, transport.sent_messages
+		sent = transport.sent_messages[0]
+		assert sent['chat_id'] == 12345, sent
+		assert sent['parse_mode'] == 'MarkdownV2', sent
+
+		# Список чатов больше не собирается хендлером: модуль отдал готовый текст.
+		assert sent['text'] == (
+			'*List of all available chats:*\n'
+			f'ChatOID: `{MARKDOWN_CHAT_OID}`\n'
+			f'Problem: *{MARKDOWN_ESCAPED_TITLE}*\n'
+			f'ChatOID: `{MARKDOWN_ODD_OID_ESCAPED}`\n'
+			'Problem: *\\(пустой\\) заголовок*'
+		), sent['text']
+
+		# Худший случай: заголовок со спецсимволами не должен ронять команду.
+		assert_valid_markdownv2(sent['text'])
+	finally:
+		await container.close()
+
+	# Пустой каталог - тоже валидное сообщение, а не пустая отправка.
+	empty_notifier, empty_transport, empty_container = await _bot_side_notifier()
+	try:
+		await empty_notifier.notify_chat_list(tg_chat_id=12345, chats=[])
+		assert empty_transport.sent_messages[0]['text'] == (
+			'*List of all available chats:*\n_No chats yet\\._'
+		), empty_transport.sent_messages[0]['text']
+		assert_valid_markdownv2(empty_transport.sent_messages[0]['text'])
+	finally:
+		await empty_container.close()
+
+
+async def _smoke_acknowledge_over_transport() -> None:
+	"""Подтверждение менеджеру - обычный текст: разметки в нём нет."""
+	notifier, transport, container = await _bot_side_notifier()
+
+	try:
+		# chat_oid в тексте подтверждения остаётся как есть: без parse_mode экранирование
+		# не нужно, а с ним символы UUID превратились бы в слэши в тексте у менеджера.
+		await notifier.acknowledge(
+			tg_chat_id=12345,
+			text=f'Reply accepted for chat {MARKDOWN_CHAT_OID}.',
+		)
+
+		assert len(transport.sent_messages) == 1, transport.sent_messages
+		sent = transport.sent_messages[0]
+		assert sent['chat_id'] == 12345, sent
+		assert sent['text'] == f'Reply accepted for chat {MARKDOWN_CHAT_OID}.', sent
+		assert sent.get('parse_mode') is None, sent
+	finally:
+		await container.close()
+
+
 async def main() -> None:
 	chat_payload = {
 		'oid': CHAT_OID,
@@ -241,6 +339,8 @@ async def main() -> None:
 		transport=OfflineTelegramTransport(),
 		registry=InMemoryReplyRegistry(),
 	)
+	await _smoke_chat_list_over_transport()
+	await _smoke_acknowledge_over_transport()
 
 	print('NOTIFIER_SMOKE_OK')
 

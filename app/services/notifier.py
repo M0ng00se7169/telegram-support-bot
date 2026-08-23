@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from html import escape
 
 from telegram import Bot
+from telegram.helpers import escape_markdown
 
 from dtos.messages import ChatListItemDTO
 from services.replies import BaseReplyRegistry
@@ -27,6 +28,11 @@ from services.replies import BaseReplyRegistry
 # отрицательный, а каналы адресуются `@username`. Источники в проекте тоже
 # разные: Web API отдаёт Chat Listener как строку, PTB отдаёт id апдейта как int.
 TelegramAddress = int | str
+
+
+def _escape_markdown_code(value: str) -> str:
+	"""Экранирует только зарезервированные символы MarkdownV2 внутри code."""
+	return value.replace('\\', '\\\\').replace('`', '\\`')
 
 
 class BaseNotifier(ABC):
@@ -88,7 +94,26 @@ class TelegramNotifier(BaseNotifier):
 		tg_chat_id: TelegramAddress,
 		chats: Sequence[ChatListItemDTO],
 	) -> None:
-		raise NotImplementedError('операция «показать список чатов» ещё не реализована')
+		header = '*List of all available chats:*'
+		if not chats:
+			text = f'{header}\n_{escape_markdown("No chats yet.", version=2)}_'
+		else:
+			blocks = [
+				'\n'.join(
+					(
+						f'ChatOID: `{_escape_markdown_code(chat.oid)}`',
+						f'Problem: *{escape_markdown(chat.title, version=2)}*',
+					),
+				)
+				for chat in chats
+			]
+			text = '\n'.join([header, *blocks])
+
+		await self.bot.send_message(
+			chat_id=tg_chat_id,
+			text=text,
+			parse_mode='MarkdownV2',
+		)
 
 	async def acknowledge(self, tg_chat_id: TelegramAddress, text: str) -> None:
-		raise NotImplementedError('операция «подтвердить действие» ещё не реализована')
+		await self.bot.send_message(chat_id=tg_chat_id, text=text)
