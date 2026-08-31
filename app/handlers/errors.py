@@ -19,11 +19,20 @@ async def error_handler(update: Update, context: CallbackContext) -> None:
 		return
 
 	message = update.effective_message
-	tg_chat_id = message.chat.id  # type: ignore[union-attr]
+	if message is None:
+		chat = update.effective_chat
+		if chat is None:
+			return
+		tg_chat_id = chat.id
+		reply_to_message_id = None
+	else:
+		tg_chat_id = message.chat.id
+		reply_to_message_id = message.message_id
 
 	async with _request_scope(context) as request_container:
 		notifier = await request_container.get(BaseNotifier)
 		await notifier.acknowledge(
 			tg_chat_id=tg_chat_id,
 			text=text,
+			reply_to_message_id=reply_to_message_id,
 		)

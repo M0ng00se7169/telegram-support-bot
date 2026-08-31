@@ -53,7 +53,12 @@ class BaseNotifier(ABC):
 	) -> None: ...
 
 	@abstractmethod
-	async def acknowledge(self, tg_chat_id: TelegramAddress, text: str) -> None: ...
+	async def acknowledge(
+		self,
+		tg_chat_id: TelegramAddress,
+		text: str,
+		reply_to_message_id: int | None = None,
+	) -> None: ...
 
 
 @dataclass
@@ -115,5 +120,17 @@ class TelegramNotifier(BaseNotifier):
 			parse_mode='MarkdownV2',
 		)
 
-	async def acknowledge(self, tg_chat_id: TelegramAddress, text: str) -> None:
-		await self.bot.send_message(chat_id=tg_chat_id, text=text)
+	async def acknowledge(
+		self,
+		tg_chat_id: TelegramAddress,
+		text: str,
+		reply_to_message_id: int | None = None,
+	) -> None:
+		if reply_to_message_id is None:
+			await self.bot.send_message(chat_id=tg_chat_id, text=text)
+		else:
+			await self.bot.send_message(
+				chat_id=tg_chat_id,
+				text=text,
+				reply_to_message_id=reply_to_message_id,
+			)

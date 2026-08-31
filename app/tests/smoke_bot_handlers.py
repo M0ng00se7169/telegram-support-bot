@@ -47,6 +47,7 @@ from exceptions.web import WebApiError  # noqa: E402
 
 CHAT_OID = '3f2b1c8e-5a4d-4b7c-9e10-2d3f4a5b6c7d'
 HOSTILE_TITLE = 'route 77 — problem (login) #1_ok'
+ERROR_MESSAGE_ID = 67890
 
 
 class _OfflineProvider(Provider):
@@ -92,6 +93,8 @@ def _assert_plain_message(sent: dict, text: str) -> None:
 	assert sent['chat_id'] == 12345, sent
 	assert sent['text'] == text, sent
 	assert sent.get('parse_mode') is None, sent
+	assert 'reply_to_message_id' not in sent, sent
+	assert 'reply_parameters' not in sent, sent
 
 
 async def main() -> None:
@@ -169,13 +172,21 @@ async def main() -> None:
 		)
 		error_update = SimpleNamespace(
 			effective_chat=None,
-			effective_message=SimpleNamespace(chat=_FakeChat()),
+			effective_message=SimpleNamespace(
+				chat=_FakeChat(),
+				message_id=ERROR_MESSAGE_ID,
+			),
 		)
 		await error_handler(error_update, error_context)
-		_assert_plain_message(
-			transport.sent_messages[-1],
-			'Web API GET /chat/ failed with 503\ntemporarily unavailable',
-		)
+		error_message = transport.sent_messages[-1]
+		assert error_message['chat_id'] == 12345, error_message
+		assert error_message['text'] == (
+			'Web API GET /chat/ failed with 503\ntemporarily unavailable'
+		), error_message
+		assert error_message.get('parse_mode') is None, error_message
+		assert error_message.get('reply_parameters') == {
+			'message_id': ERROR_MESSAGE_ID,
+		}, error_message
 	finally:
 		await container.close()
 		factories._container = None

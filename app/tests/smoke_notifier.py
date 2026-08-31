@@ -134,7 +134,12 @@ class _RecordingNotifier(BaseNotifier):
 	) -> None:
 		raise AssertionError('операция «показать список чатов» вне этого билета')
 
-	async def acknowledge(self, tg_chat_id: TelegramAddress, text: str) -> None:
+	async def acknowledge(
+		self,
+		tg_chat_id: TelegramAddress,
+		text: str,
+		reply_to_message_id: int | None = None,
+	) -> None:
 		raise AssertionError('операция «подтвердить действие» вне этого билета')
 
 
