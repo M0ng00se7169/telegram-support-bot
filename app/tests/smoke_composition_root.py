@@ -3,8 +3,7 @@
 Runs the real Kafka subscriber end to end without any network:
 - faststream TestKafkaBroker replaces the Kafka connection;
 - httpx MockTransport serves canned API responses;
-- настоящий PTB Bot говорит через заглушку транспорта Telegram
-  (tests/telegram_transport.py), которая записывает исходящие вызовы.
+- an in-memory BaseNotifier records the consumer's business event.
 
 Run:  python tests/smoke_composition_root.py   (from the app/ directory)
 """
@@ -17,6 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import asyncio  # noqa: E402
+from collections.abc import Sequence  # noqa: E402
+from dataclasses import (
+	dataclass,
+	field,
+)  # noqa: E402
 
 import httpx  # noqa: E402
 from dishka import (  # noqa: E402
@@ -37,17 +41,55 @@ from httpx import (  # noqa: E402
 	Response,
 )
 from settings import get_settings  # noqa: E402
-from telegram_transport import (  # noqa: E402
-	offline_telegram_provider,
-	OfflineTelegramTransport,
-)
 
 from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
+from dtos.messages import ChatListItemDTO  # noqa: E402
+from services.notifier import (  # noqa: E402
+	BaseNotifier,
+	TelegramAddress,
+)
 from services.replies import (  # noqa: E402
 	BaseReplyRegistry,
 	InMemoryReplyRegistry,
 )
+
+
+@dataclass
+class _Notification:
+	tg_chat_id: TelegramAddress
+	chat_oid: str
+	title: str
+	text: str
+
+
+@dataclass
+class _RecordingNotifier(BaseNotifier):
+	notifications: list[_Notification] = field(default_factory=list)
+
+	async def notify_new_message(
+		self,
+		tg_chat_id: TelegramAddress,
+		chat_oid: str,
+		title: str,
+		text: str,
+	) -> None:
+		self.notifications.append(_Notification(tg_chat_id, chat_oid, title, text))
+
+	async def notify_chat_list(
+		self,
+		tg_chat_id: TelegramAddress,
+		chats: Sequence[ChatListItemDTO],
+	) -> None:
+		raise AssertionError('chat list notification is outside this smoke')
+
+	async def acknowledge(
+		self,
+		tg_chat_id: TelegramAddress,
+		text: str,
+		reply_to_message_id: int | None = None,
+	) -> None:
+		raise AssertionError('acknowledgement is outside this smoke')
 
 
 class OfflineProvider(Provider):
@@ -76,7 +118,12 @@ class OfflineProvider(Provider):
 
 async def main() -> None:
 	settings = get_settings()
-	transport = OfflineTelegramTransport()
+	sink = _RecordingNotifier()
+
+	class _NotifierProvider(Provider):
+		@provide(scope=Scope.APP)
+		def get_notifier(self) -> BaseNotifier:
+			return sink
 
 	broker = KafkaBroker(settings.KAFKA_BROKER_URL)
 	broker.include_router(router=router)
@@ -85,7 +132,7 @@ async def main() -> None:
 	container = make_async_container(
 		DefaultProvider(),
 		OfflineProvider(),
-		offline_telegram_provider(transport),
+		_NotifierProvider(),
 	)
 	setup_dishka(container, app)
 
@@ -102,10 +149,12 @@ async def main() -> None:
 			key=b'chat-oid',
 		)
 
-	sent_messages = transport.sent_messages
-	assert len(sent_messages) == 1, f'expected 1 message, sent {sent_messages}'
-	assert sent_messages[0]['chat_id'] == '42'
-	assert '<blockquote>hello</blockquote>' in sent_messages[0]['text']
+	assert len(sink.notifications) == 1, sink.notifications
+	notification = sink.notifications[0]
+	assert notification.tg_chat_id == '42', notification
+	assert notification.chat_oid == 'chat-oid', notification
+	assert notification.title == 'chat title', notification
+	assert notification.text == 'hello', notification
 	await container.close()
 	print('INJECTION_SMOKE_OK')
 

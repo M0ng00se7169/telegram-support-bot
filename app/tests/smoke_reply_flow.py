@@ -1,14 +1,8 @@
-"""Offline end-to-end smoke of the Manager Reply flow (card #1).
+"""Offline smoke of the consumer event and Manager Reply flow (card #1).
 
-Chain under test, all offline (TestKafkaBroker + MockTransport + transport stub):
-1. consumer side — real Kafka pipeline: TestKafkaBroker delivers the event,
-   DishkaMiddleware opens the request scope, the real subscriber sends the
-   notification through the Telegram transport seam
-   (tests/telegram_transport.py) and registers
-   (tg_message_id -> chat_oid) in the registry override;
-2. bot side — real ConversationHandler callback `send_message_to_chat`
-   resolves chat_oid through _request_scope + BaseReplyRegistry;
-   no regex anywhere.
+The consumer side uses TestKafkaBroker + MockTransport + an in-memory notifier.
+The manager side calls the real reply handler with an explicit registry fixture;
+the fake notifier does not create Reply Registry records.
 
 Run:  python tests/smoke_reply_flow.py   (from the app/ directory)
 """
@@ -26,9 +20,14 @@ import os
 os.environ.setdefault('TG_BOT_TOKEN', '123456:TEST-TOKEN')
 
 import asyncio  # noqa: E402
+from collections.abc import Sequence  # noqa: E402
+from dataclasses import (
+	dataclass,
+	field,
+)  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 
 import httpx  # noqa: E402
-import telegram  # noqa: E402
 from dishka import (  # noqa: E402
 	make_async_container,
 	provide,
@@ -47,22 +46,71 @@ from httpx import (  # noqa: E402
 	Response,
 )
 from settings import get_settings  # noqa: E402
-from telegram_transport import (  # noqa: E402
-	offline_telegram_provider,
-	OfflineTelegramTransport,
-)
 
-import containers.factories as factories  # noqa: E402
 from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
+from dtos.messages import ChatListItemDTO  # noqa: E402
+from services.notifier import (  # noqa: E402
+	BaseNotifier,
+	TelegramAddress,
+)
 from services.replies import (  # noqa: E402
 	BaseReplyRegistry,
 	InMemoryReplyRegistry,
 )
 
 
-REGISTRY_OVERRIDE_VALUE = InMemoryReplyRegistry()
 CHAT_OID = 'chat-oid-77'
+MANAGER_TG_CHAT_ID = 12345
+NOTIFICATION_MESSAGE_ID = 777_001
+REGISTRY_OVERRIDE_VALUE = InMemoryReplyRegistry()
+
+
+@dataclass
+class _Notification:
+	tg_chat_id: TelegramAddress
+	chat_oid: str
+	title: str
+	text: str
+
+
+@dataclass
+class _Acknowledgement:
+	tg_chat_id: TelegramAddress
+	text: str
+	reply_to_message_id: int | None
+
+
+@dataclass
+class _RecordingNotifier(BaseNotifier):
+	notifications: list[_Notification] = field(default_factory=list)
+	acknowledgements: list[_Acknowledgement] = field(default_factory=list)
+
+	async def notify_new_message(
+		self,
+		tg_chat_id: TelegramAddress,
+		chat_oid: str,
+		title: str,
+		text: str,
+	) -> None:
+		self.notifications.append(_Notification(tg_chat_id, chat_oid, title, text))
+
+	async def notify_chat_list(
+		self,
+		tg_chat_id: TelegramAddress,
+		chats: Sequence[ChatListItemDTO],
+	) -> None:
+		raise AssertionError('chat list notification is outside this smoke')
+
+	async def acknowledge(
+		self,
+		tg_chat_id: TelegramAddress,
+		text: str,
+		reply_to_message_id: int | None = None,
+	) -> None:
+		self.acknowledgements.append(
+			_Acknowledgement(tg_chat_id, text, reply_to_message_id),
+		)
 
 
 class _OfflineProvider(Provider):
@@ -75,8 +123,7 @@ class _OfflineProvider(Provider):
 		}
 
 		def transport_handler(request: httpx.Request) -> Response:
-			path = request.url.path
-			if path.endswith('/listeners/'):
+			if request.url.path.endswith('/listeners/'):
 				return Response(200, json=[{'oid': '12345'}])
 			return Response(200, json=chat)
 
@@ -88,56 +135,40 @@ class _OfflineProvider(Provider):
 
 
 class _FakeContext:
-	def __init__(self, application) -> None:
-		self.bot = application.bot
-		self.application = application
-
-
-def _message(message_id: int) -> telegram.Message:
-	return telegram.Message(
-		message_id=message_id,
-		date=None,
-		chat=telegram.Chat(id=1, type='private'),
-	)
-
-
-class _FakeChat:
-	id = 12345
+	def __init__(self, container) -> None:
+		self.application = SimpleNamespace(bot_data={'container': container})
 
 
 class _FakeUpdate:
-	effective_chat = _FakeChat()
+	effective_chat = SimpleNamespace(id=MANAGER_TG_CHAT_ID)
 
-	def __init__(self, reply_to) -> None:
-		self.message = telegram.Message(
-			message_id=99_999,
-			date=None,
-			chat=telegram.Chat(id=12345, type='private'),
-			reply_to_message=reply_to,
-		)
+	def __init__(self, reply_to_message_id: int | None) -> None:
+		reply_to_message = None
+		if reply_to_message_id is not None:
+			reply_to_message = SimpleNamespace(message_id=reply_to_message_id)
+		self.message = SimpleNamespace(reply_to_message=reply_to_message)
 
 
 async def main() -> None:
 	settings = get_settings()
-	transport = OfflineTelegramTransport()
+	sink = _RecordingNotifier()
+
+	class _NotifierProvider(Provider):
+		@provide(scope=Scope.APP)
+		def get_notifier(self) -> BaseNotifier:
+			return sink
+
 	container = make_async_container(
 		DefaultProvider(),
 		_OfflineProvider(),
-		offline_telegram_provider(transport),
+		_NotifierProvider(),
 	)
-	factories._container = container
-
-	from main import get_app
-
-	application = get_app(request=transport)
-	context = _FakeContext(application)
 
 	broker = KafkaBroker(settings.KAFKA_BROKER_URL)
 	broker.include_router(router=router)
 	app = FastStream(broker=broker)
 	setup_dishka(container=container, app=app)
 
-	# --- Consumer side: notification + registry write. ---
 	async with TestKafkaBroker(broker) as test_broker:
 		await test_broker.publish(
 			{
@@ -151,38 +182,48 @@ async def main() -> None:
 			key=CHAT_OID.encode(),
 		)
 
-	notification = transport.sent_messages[-1]
-	assert notification['chat_id'] == '12345'
-	assert '<blockquote>hello from route 77</blockquote>' in notification['text']
-	assert CHAT_OID not in notification['text'], 'oid marker must be gone'
-	# message_id, который заглушка отдала как message_id доставленного уведомления.
-	notification_message_id = transport.sent_calls[-1].result['message_id']
+	assert len(sink.notifications) == 1, sink.notifications
+	notification = sink.notifications[0]
+	assert notification.tg_chat_id == '12345', notification
+	assert notification.chat_oid == CHAT_OID, notification
+	assert notification.title == 'route 77', notification
+	assert notification.text == 'hello from route 77', notification
+	assert not sink.acknowledgements, sink.acknowledgements
 
-	registry_record = await REGISTRY_OVERRIDE_VALUE.resolve(notification_message_id)
-	assert registry_record == CHAT_OID, registry_record
+	# Fixture the successful delivery mapping explicitly: a fake notifier has no
+	# Telegram message id and must not be credited with writing this registry pair.
+	await REGISTRY_OVERRIDE_VALUE.remember(
+		message_id=NOTIFICATION_MESSAGE_ID,
+		chat_oid=CHAT_OID,
+	)
 
-	# --- Bot side: manager replies to the TG notification. ---
 	from handlers.chats import send_message_to_chat
 
-	await send_message_to_chat(_FakeUpdate(reply_to=None), context)
-	missing_reply_ack = transport.sent_messages[-1]
-	assert 'choose the message' in missing_reply_ack['text']
-	assert missing_reply_ack.get('parse_mode') is None, missing_reply_ack
+	context = _FakeContext(container)
+	await send_message_to_chat(_FakeUpdate(reply_to_message_id=None), context)
+	missing_reply_ack = sink.acknowledgements[-1]
+	assert missing_reply_ack.tg_chat_id == MANAGER_TG_CHAT_ID
+	assert (
+		missing_reply_ack.text == 'Error! Please choose the message you want to reply.'
+	)
+	assert missing_reply_ack.reply_to_message_id is None
 
 	await send_message_to_chat(
-		_FakeUpdate(reply_to=_message(notification_message_id)),
+		_FakeUpdate(reply_to_message_id=NOTIFICATION_MESSAGE_ID),
 		context,
 	)
-	ack = transport.sent_messages[-1]
-	assert ack['chat_id'] == 12345
-	assert CHAT_OID in ack['text'], ack
-	assert ack.get('parse_mode') is None, ack
+	accepted_ack = sink.acknowledgements[-1]
+	assert accepted_ack.tg_chat_id == MANAGER_TG_CHAT_ID
+	assert accepted_ack.text == f'Reply accepted for chat {CHAT_OID}.'
+	assert accepted_ack.reply_to_message_id is None
 
-	# --- Reply target unknown to the registry (expired / foreign). ---
-	await send_message_to_chat(_FakeUpdate(reply_to=_message(424_242)), context)
-	warning = transport.sent_messages[-1]
-	assert warning['text'].startswith('Please reply to a chat notification'), warning
-	assert warning.get('parse_mode') is None, warning
+	await send_message_to_chat(_FakeUpdate(reply_to_message_id=424_242), context)
+	unknown_reply_ack = sink.acknowledgements[-1]
+	assert unknown_reply_ack.tg_chat_id == MANAGER_TG_CHAT_ID
+	assert unknown_reply_ack.text.startswith(
+		'Please reply to a chat notification (or the record has expired).',
+	)
+	assert unknown_reply_ack.reply_to_message_id is None
 
 	await container.close()
 	print('REPLY_FLOW_SMOKE_OK')
