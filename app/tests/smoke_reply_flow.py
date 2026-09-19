@@ -20,11 +20,6 @@ import os
 os.environ.setdefault('TG_BOT_TOKEN', '123456:TEST-TOKEN')
 
 import asyncio  # noqa: E402
-from collections.abc import Sequence  # noqa: E402
-from dataclasses import (
-	dataclass,
-	field,
-)  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 import httpx  # noqa: E402
@@ -49,10 +44,9 @@ from settings import get_settings  # noqa: E402
 
 from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
-from dtos.messages import ChatListItemDTO  # noqa: E402
-from services.notifier import (  # noqa: E402
-	BaseNotifier,
-	TelegramAddress,
+from notifier_fakes import (  # noqa: E402
+	RecordingNotifier,
+	notifier_override_provider,
 )
 from services.replies import (  # noqa: E402
 	BaseReplyRegistry,
@@ -64,53 +58,6 @@ CHAT_OID = 'chat-oid-77'
 MANAGER_TG_CHAT_ID = 12345
 NOTIFICATION_MESSAGE_ID = 777_001
 REGISTRY_OVERRIDE_VALUE = InMemoryReplyRegistry()
-
-
-@dataclass
-class _Notification:
-	tg_chat_id: TelegramAddress
-	chat_oid: str
-	title: str
-	text: str
-
-
-@dataclass
-class _Acknowledgement:
-	tg_chat_id: TelegramAddress
-	text: str
-	reply_to_message_id: int | None
-
-
-@dataclass
-class _RecordingNotifier(BaseNotifier):
-	notifications: list[_Notification] = field(default_factory=list)
-	acknowledgements: list[_Acknowledgement] = field(default_factory=list)
-
-	async def notify_new_message(
-		self,
-		tg_chat_id: TelegramAddress,
-		chat_oid: str,
-		title: str,
-		text: str,
-	) -> None:
-		self.notifications.append(_Notification(tg_chat_id, chat_oid, title, text))
-
-	async def notify_chat_list(
-		self,
-		tg_chat_id: TelegramAddress,
-		chats: Sequence[ChatListItemDTO],
-	) -> None:
-		raise AssertionError('chat list notification is outside this smoke')
-
-	async def acknowledge(
-		self,
-		tg_chat_id: TelegramAddress,
-		text: str,
-		reply_to_message_id: int | None = None,
-	) -> None:
-		self.acknowledgements.append(
-			_Acknowledgement(tg_chat_id, text, reply_to_message_id),
-		)
 
 
 class _OfflineProvider(Provider):
@@ -151,17 +98,12 @@ class _FakeUpdate:
 
 async def main() -> None:
 	settings = get_settings()
-	sink = _RecordingNotifier()
-
-	class _NotifierProvider(Provider):
-		@provide(scope=Scope.APP)
-		def get_notifier(self) -> BaseNotifier:
-			return sink
+	sink = RecordingNotifier()
 
 	container = make_async_container(
 		DefaultProvider(),
 		_OfflineProvider(),
-		_NotifierProvider(),
+		notifier_override_provider(sink),
 	)
 
 	broker = KafkaBroker(settings.KAFKA_BROKER_URL)
@@ -183,11 +125,11 @@ async def main() -> None:
 		)
 
 	assert len(sink.notifications) == 1, sink.notifications
-	notification = sink.notifications[0]
-	assert notification.tg_chat_id == '12345', notification
-	assert notification.chat_oid == CHAT_OID, notification
-	assert notification.title == 'route 77', notification
-	assert notification.text == 'hello from route 77', notification
+	tg_chat_id, notification = sink.notifications[0]
+	assert tg_chat_id == '12345', sink.notifications[0]
+	assert notification.chat_oid == CHAT_OID, sink.notifications[0]
+	assert notification.title == 'route 77', sink.notifications[0]
+	assert notification.text == 'hello from route 77', sink.notifications[0]
 	assert not sink.acknowledgements, sink.acknowledgements
 
 	# Fixture the successful delivery mapping explicitly: a fake notifier has no

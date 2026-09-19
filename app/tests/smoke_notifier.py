@@ -26,11 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import asyncio  # noqa: E402
-from collections.abc import Sequence  # noqa: E402
-from dataclasses import (  # noqa: E402
-	dataclass,
-	field,
-)
 
 import httpx  # noqa: E402
 from markdown_v2 import assert_valid_markdownv2  # noqa: E402
@@ -59,10 +54,11 @@ from telegram_transport import (  # noqa: E402
 
 from containers.providers import DefaultProvider  # noqa: E402
 from dtos.messages import ChatListItemDTO  # noqa: E402
-from services.notifier import (  # noqa: E402
-	BaseNotifier,
-	TelegramAddress,
+from notifier_fakes import (  # noqa: E402
+	RecordingNotifier,
+	notifier_override_provider,
 )
+from services.notifier import BaseNotifier  # noqa: E402
 from services.replies import (  # noqa: E402
 	BaseReplyRegistry,
 	InMemoryReplyRegistry,
@@ -93,54 +89,6 @@ _EVENT = {
 	'message_oid': 'm-notifier',
 	'chat_oid': CHAT_OID,
 }
-
-
-@dataclass
-class _NewMessageCall:
-	"""Что бизнес-операция «уведомить о новом сообщении» получила снаружи."""
-
-	tg_chat_id: str
-	chat_oid: str
-	title: str
-	text: str
-
-
-@dataclass
-class _RecordingNotifier(BaseNotifier):
-	"""Подменённый Notifier: in-memory sink вместо Telegram."""
-
-	calls: list[_NewMessageCall] = field(default_factory=list)
-
-	async def notify_new_message(
-		self,
-		tg_chat_id: TelegramAddress,
-		chat_oid: str,
-		title: str,
-		text: str,
-	) -> None:
-		self.calls.append(
-			_NewMessageCall(
-				tg_chat_id=tg_chat_id,
-				chat_oid=chat_oid,
-				title=title,
-				text=text,
-			),
-		)
-
-	async def notify_chat_list(
-		self,
-		tg_chat_id: TelegramAddress,
-		chats: Sequence[ChatListItemDTO],
-	) -> None:
-		raise AssertionError('операция «показать список чатов» вне этого билета')
-
-	async def acknowledge(
-		self,
-		tg_chat_id: TelegramAddress,
-		text: str,
-		reply_to_message_id: int | None = None,
-	) -> None:
-		raise AssertionError('операция «подтвердить действие» вне этого билета')
 
 
 def _http_provider(chat_payload: dict, listener_oid: str) -> Provider:
@@ -177,32 +125,33 @@ async def _publish_event(container) -> None:
 
 async def _smoke_kafka_to_notifier(chat_payload: dict, listener_oid: str) -> None:
 	"""Шов 1: событие доходит до Notifier'а ровно тройкой бизнес-полей."""
-	sink = _RecordingNotifier()
+	sink = RecordingNotifier()
 
 	class _NotifierOverrideProvider(Provider):
 		@provide(scope=Scope.APP)
 		def get_reply_registry(self) -> BaseReplyRegistry:
 			return InMemoryReplyRegistry()
 
-		@provide(scope=Scope.APP)
-		def get_notifier(self) -> BaseNotifier:
-			return sink
-
 	container = make_async_container(
 		DefaultProvider(),
 		_http_provider(chat_payload, listener_oid),
 		_NotifierOverrideProvider(),
+		notifier_override_provider(sink),
 		offline_telegram_provider(OfflineTelegramTransport()),
 	)
 
 	await _publish_event(container)
 
-	assert len(sink.calls) == 1, f'expected 1 notification, got {sink.calls}'
-	call = sink.calls[0]
-	assert call.tg_chat_id == listener_oid, call
-	assert call.title == HOSTILE_TITLE, call
-	assert call.text == HOSTILE_TEXT, call
-	assert call.chat_oid == CHAT_OID, 'реестр получает oid из события, не из key'
+	assert (
+		len(sink.notifications) == 1
+	), f'expected 1 notification, got {sink.notifications}'
+	tg_chat_id, notification = sink.notifications[0]
+	assert tg_chat_id == listener_oid, sink.notifications[0]
+	assert notification.title == HOSTILE_TITLE, sink.notifications[0]
+	assert notification.text == HOSTILE_TEXT, sink.notifications[0]
+	assert (
+		notification.chat_oid == CHAT_OID
+	), 'реестр получает oid из события, не из key'
 
 	await container.close()
 

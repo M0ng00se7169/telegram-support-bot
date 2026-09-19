@@ -6,7 +6,10 @@ from faststream.kafka import KafkaRouter
 from settings import get_settings
 
 from consumers.schemas import NewChatMessageSchema
-from services.notifier import BaseNotifier
+from services.notifier import (
+	BaseNotifier,
+	NewMessageNotification,
+)
 from services.web import BaseChatDirectory
 
 
@@ -27,13 +30,16 @@ async def new_message_subscription_handler(
 
 	listeners = await directory.get_chat_listeners(chat_oid=chat_oid)
 	chat_info = await directory.get_chat_info(chat_oid=chat_oid)
+	notification = NewMessageNotification(
+		chat_oid=chat_oid,
+		title=chat_info.title,
+		text=message.message_text,
+	)
 
 	for listener in listeners:
 		# Формат уведомления, parse_mode и запись в Reply Registry — забота
 		# Notifier'а; здесь остаётся только бизнес-факт: кому и о чём сообщать.
 		await notifier.notify_new_message(
 			tg_chat_id=listener.oid,
-			chat_oid=chat_oid,
-			title=chat_info.title,
-			text=message.message_text,
+			notification=notification,
 		)

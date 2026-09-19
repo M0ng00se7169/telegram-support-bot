@@ -30,6 +30,13 @@ from services.replies import BaseReplyRegistry
 TelegramAddress = int | str
 
 
+@dataclass(frozen=True)
+class NewMessageNotification:
+	chat_oid: str
+	title: str
+	text: str
+
+
 def _escape_markdown_code(value: str) -> str:
 	"""Экранирует только зарезервированные символы MarkdownV2 внутри code."""
 	return value.replace('\\', '\\\\').replace('`', '\\`')
@@ -40,9 +47,7 @@ class BaseNotifier(ABC):
 	async def notify_new_message(
 		self,
 		tg_chat_id: TelegramAddress,
-		chat_oid: str,
-		title: str,
-		text: str,
+		notification: NewMessageNotification,
 	) -> None: ...
 
 	@abstractmethod
@@ -71,9 +76,7 @@ class TelegramNotifier(BaseNotifier):
 	async def notify_new_message(
 		self,
 		tg_chat_id: TelegramAddress,
-		chat_oid: str,
-		title: str,
-		text: str,
+		notification: NewMessageNotification,
 	) -> None:
 		# HTML выбран для уведомления о новом сообщении: blockquote, который
 		# цитирует реплику клиента, в MarkdownV2 пришлось бы городить вручную.
@@ -84,14 +87,14 @@ class TelegramNotifier(BaseNotifier):
 		sent_message = await self.bot.send_message(
 			chat_id=tg_chat_id,
 			text=(
-				f'New message in chat <b>{escape(title, quote=False)}</b>'
-				f'<blockquote>{escape(text, quote=False)}</blockquote>'
+				f'New message in chat <b>{escape(notification.title, quote=False)}</b>'
+				f'<blockquote>{escape(notification.text, quote=False)}</blockquote>'
 			),
 			parse_mode='HTML',
 		)
 		await self.reply_registry.remember(
 			message_id=sent_message.message_id,
-			chat_oid=chat_oid,
+			chat_oid=notification.chat_oid,
 		)
 
 	async def notify_chat_list(

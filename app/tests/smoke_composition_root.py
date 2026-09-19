@@ -16,11 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import asyncio  # noqa: E402
-from collections.abc import Sequence  # noqa: E402
-from dataclasses import (
-	dataclass,
-	field,
-)  # noqa: E402
 
 import httpx  # noqa: E402
 from dishka import (  # noqa: E402
@@ -44,52 +39,14 @@ from settings import get_settings  # noqa: E402
 
 from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
-from dtos.messages import ChatListItemDTO  # noqa: E402
-from services.notifier import (  # noqa: E402
-	BaseNotifier,
-	TelegramAddress,
+from notifier_fakes import (  # noqa: E402
+	RecordingNotifier,
+	notifier_override_provider,
 )
 from services.replies import (  # noqa: E402
 	BaseReplyRegistry,
 	InMemoryReplyRegistry,
 )
-
-
-@dataclass
-class _Notification:
-	tg_chat_id: TelegramAddress
-	chat_oid: str
-	title: str
-	text: str
-
-
-@dataclass
-class _RecordingNotifier(BaseNotifier):
-	notifications: list[_Notification] = field(default_factory=list)
-
-	async def notify_new_message(
-		self,
-		tg_chat_id: TelegramAddress,
-		chat_oid: str,
-		title: str,
-		text: str,
-	) -> None:
-		self.notifications.append(_Notification(tg_chat_id, chat_oid, title, text))
-
-	async def notify_chat_list(
-		self,
-		tg_chat_id: TelegramAddress,
-		chats: Sequence[ChatListItemDTO],
-	) -> None:
-		raise AssertionError('chat list notification is outside this smoke')
-
-	async def acknowledge(
-		self,
-		tg_chat_id: TelegramAddress,
-		text: str,
-		reply_to_message_id: int | None = None,
-	) -> None:
-		raise AssertionError('acknowledgement is outside this smoke')
 
 
 class OfflineProvider(Provider):
@@ -118,12 +75,7 @@ class OfflineProvider(Provider):
 
 async def main() -> None:
 	settings = get_settings()
-	sink = _RecordingNotifier()
-
-	class _NotifierProvider(Provider):
-		@provide(scope=Scope.APP)
-		def get_notifier(self) -> BaseNotifier:
-			return sink
+	sink = RecordingNotifier()
 
 	broker = KafkaBroker(settings.KAFKA_BROKER_URL)
 	broker.include_router(router=router)
@@ -132,7 +84,7 @@ async def main() -> None:
 	container = make_async_container(
 		DefaultProvider(),
 		OfflineProvider(),
-		_NotifierProvider(),
+		notifier_override_provider(sink),
 	)
 	setup_dishka(container, app)
 
@@ -150,11 +102,11 @@ async def main() -> None:
 		)
 
 	assert len(sink.notifications) == 1, sink.notifications
-	notification = sink.notifications[0]
-	assert notification.tg_chat_id == '42', notification
-	assert notification.chat_oid == 'chat-oid', notification
-	assert notification.title == 'chat title', notification
-	assert notification.text == 'hello', notification
+	tg_chat_id, notification = sink.notifications[0]
+	assert tg_chat_id == '42', sink.notifications[0]
+	assert notification.chat_oid == 'chat-oid', sink.notifications[0]
+	assert notification.title == 'chat title', sink.notifications[0]
+	assert notification.text == 'hello', sink.notifications[0]
 	await container.close()
 	print('INJECTION_SMOKE_OK')
 
