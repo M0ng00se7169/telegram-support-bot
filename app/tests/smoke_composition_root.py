@@ -41,12 +41,14 @@ from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
 from notifier_fakes import (  # noqa: E402
 	RecordingNotifier,
+	assert_single_notification,
 	notifier_override_provider,
 )
 from services.replies import (  # noqa: E402
 	BaseReplyRegistry,
 	InMemoryReplyRegistry,
 )
+from services.notifier import NewMessageNotification  # noqa: E402
 
 
 class OfflineProvider(Provider):
@@ -101,12 +103,16 @@ async def main() -> None:
 			key=b'chat-oid',
 		)
 
-	assert len(sink.notifications) == 1, sink.notifications
-	tg_chat_id, notification = sink.notifications[0]
-	assert tg_chat_id == '42', sink.notifications[0]
-	assert notification.chat_oid == 'chat-oid', sink.notifications[0]
-	assert notification.title == 'chat title', sink.notifications[0]
-	assert notification.text == 'hello', sink.notifications[0]
+	assert_single_notification(
+		sink,
+		expected_tg_chat_id='42',
+		expected_notification=NewMessageNotification(
+			chat_oid='chat-oid',
+			title='chat title',
+			text='hello',
+		),
+		context='composition-root consumer notification',
+	)
 	await container.close()
 	print('INJECTION_SMOKE_OK')
 

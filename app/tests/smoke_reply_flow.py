@@ -46,8 +46,10 @@ from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
 from notifier_fakes import (  # noqa: E402
 	RecordingNotifier,
+	assert_single_notification,
 	notifier_override_provider,
 )
+from services.notifier import NewMessageNotification  # noqa: E402
 from services.replies import (  # noqa: E402
 	BaseReplyRegistry,
 	InMemoryReplyRegistry,
@@ -124,12 +126,16 @@ async def main() -> None:
 			key=CHAT_OID.encode(),
 		)
 
-	assert len(sink.notifications) == 1, sink.notifications
-	tg_chat_id, notification = sink.notifications[0]
-	assert tg_chat_id == '12345', sink.notifications[0]
-	assert notification.chat_oid == CHAT_OID, sink.notifications[0]
-	assert notification.title == 'route 77', sink.notifications[0]
-	assert notification.text == 'hello from route 77', sink.notifications[0]
+	assert_single_notification(
+		sink,
+		expected_tg_chat_id='12345',
+		expected_notification=NewMessageNotification(
+			chat_oid=CHAT_OID,
+			title='route 77',
+			text='hello from route 77',
+		),
+		context='reply-flow consumer notification',
+	)
 	assert not sink.acknowledgements, sink.acknowledgements
 
 	# Fixture the successful delivery mapping explicitly: a fake notifier has no

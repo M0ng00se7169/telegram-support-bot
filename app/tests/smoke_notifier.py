@@ -56,9 +56,13 @@ from containers.providers import DefaultProvider  # noqa: E402
 from dtos.messages import ChatListItemDTO  # noqa: E402
 from notifier_fakes import (  # noqa: E402
 	RecordingNotifier,
+	assert_single_notification,
 	notifier_override_provider,
 )
-from services.notifier import BaseNotifier  # noqa: E402
+from services.notifier import (  # noqa: E402
+	BaseNotifier,
+	NewMessageNotification,
+)
 from services.replies import (  # noqa: E402
 	BaseReplyRegistry,
 	InMemoryReplyRegistry,
@@ -142,16 +146,16 @@ async def _smoke_kafka_to_notifier(chat_payload: dict, listener_oid: str) -> Non
 
 	await _publish_event(container)
 
-	assert (
-		len(sink.notifications) == 1
-	), f'expected 1 notification, got {sink.notifications}'
-	tg_chat_id, notification = sink.notifications[0]
-	assert tg_chat_id == listener_oid, sink.notifications[0]
-	assert notification.title == HOSTILE_TITLE, sink.notifications[0]
-	assert notification.text == HOSTILE_TEXT, sink.notifications[0]
-	assert (
-		notification.chat_oid == CHAT_OID
-	), 'реестр получает oid из события, не из key'
+	assert_single_notification(
+		sink,
+		expected_tg_chat_id=listener_oid,
+		expected_notification=NewMessageNotification(
+			chat_oid=CHAT_OID,
+			title=HOSTILE_TITLE,
+			text=HOSTILE_TEXT,
+		),
+		context='Kafka → Notifier (chat_oid из payload события, не из Kafka key)',
+	)
 
 	await container.close()
 
