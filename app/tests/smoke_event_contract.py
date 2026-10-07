@@ -205,6 +205,21 @@ async def main() -> None:
 	assert isinstance(marked, UUID), type(marked)
 	assert str(marked) == VALID_EVENT['event_id'], marked
 
+	# Неизвестные поля на уровне КОНВЕЙЕРА: payload с отклонённым обогащением
+	# `title` (и любым лишним полем) обрабатывается как валидное событие —
+	# ровно одно уведомление, ни одного «битого». Дополняет схематическую
+	# проверку в `_check_schema_contract`: здесь публикуются настоящие байты
+	# и проверяется поведение, а не только схема (фиксация неломающего
+	# изменения контракта).
+	requests_seen.clear()
+	metrics.reset()
+	sink, capture = await run_pipeline(
+		[{**VALID_EVENT, 'title': 'route 77', 'extra_number': 1}],
+		requests_seen=requests_seen,
+	)
+	assert len(sink.notifications) == 1, sink.notifications
+	assert metrics.broken_events == 0, metrics.broken_events
+
 	print('EVENT_CONTRACT_SMOKE_OK')
 
 
