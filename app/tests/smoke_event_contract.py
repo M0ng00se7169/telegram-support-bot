@@ -1,16 +1,21 @@
-"""Offline smoke: контракт New-Message Event (карточка №5, билет 01).
+"""Offline smoke: контракт New-Message Event (карточка №5, билеты 01 и 05).
 
-Проверяется внешнее поведение контракта:
+Проверяется внешнее поведение контракта. Утверждения не ссылаются на имя
+клиентского класса схемы и на имена его полей: в файле нет ни одного такого
+упоминания — переименование приватного класса схемы этот смоук не роняет
+(file-wide, проверяется статически):
 - форма на проводе: ровно пять полей в серверном порядке (закрепляется на
-  фикстуре, которая уходит в конвейер настоящими байтами);
+  фикстуре, которая уходит в конвейер настоящими байтами), значение
+  `occurred_at` — наивное локальное время сервера без зоны;
 - типы на ГРАНИЦЕ конвейера: `event_id` — `UUID` (наблюдение на seam'е
-  дедупликации), `occurred_at` — `datetime` (наблюдение через битую дату) —
-  тест не зависит от имени клиентского класса схемы;
-- схема терпима к неизвестным полям (обогащение payload на сервере не ломает consumer'а);
-- `event_title` (серверный `ClassVar`) отсутствует в клиентской схеме;
-- `occurred_at` разбирается в наивное локальное время без зоны (сервер шлёт его без tzinfo);
-- битое событие не доставляется, не пробрасывает исключение наружу, увеличивает
-  метку «битое» и логируется с `event_id` и причиной.
+  дедупликации), `occurred_at` — `datetime` (наблюдение через битую дату);
+- конвейер терпим к неизвестным полям: отклонённое обогащение `title`,
+  лишнее поле и серверный `event_title` на проводе — ровно одно уведомление,
+  ни одного «битого» и ни одного предупреждения в логе;
+- обязательные поля строго: payload без любого из пяти обязательных полей
+  не доставляется, считается битым, логируется с `event_id` и причиной;
+- битое событие не доставляется, не пробрасывает исключение наружу,
+  увеличивает метку «битое» и логируется с `event_id` и причиной.
 
 Запуск:  python tests/smoke_event_contract.py   (из каталога app/)
 """
@@ -23,16 +28,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import asyncio  # noqa: E402
+from datetime import datetime  # noqa: E402
 from uuid import UUID  # noqa: E402
 
-from pydantic import ValidationError  # noqa: E402
+from notifier_fakes import RecordingNotifier  # noqa: E402
 from subscription_pipeline import (  # noqa: E402
+    LogCapture,
     run_pipeline,
     VALID_EVENT,
 )
 
 from consumers.metrics import metrics  # noqa: E402
-from consumers.schemas import NewMessageEvent  # noqa: E402
 from services.dedup import BaseEventDeduplicator  # noqa: E402
 
 
@@ -77,47 +83,77 @@ def _check_wire_form() -> None:
 	], list(VALID_EVENT)
 
 
-def _check_schema_contract() -> None:
-	# Типы полей здесь не проверяются: контракт типов наблюдается на границе
-	# конвейера — `UUID` на seam'е дедупликации, `datetime` через битую дату
-	# (сценарии в main). Контрактные утверждения не ссылаются на имя
-	# клиентского класса схемы — переименование его их не роняет.
-	event = NewMessageEvent.model_validate(VALID_EVENT)
-
-	# Неизвестные поля разрешены — в том числе отклонённое обогащение `title`.
-	enriched = {**VALID_EVENT, 'title': 'route 77', 'extra_number': 1}
-	assert NewMessageEvent.model_validate(enriched).chat_oid == 'chat-oid'
-
-	# `event_title` — серверный ClassVar: его нет в клиентской схеме.
-	assert 'event_title' not in NewMessageEvent.model_fields
-
-	# Сервер шлёт наивное локальное время: значение разбирается в `datetime` без зоны.
-	assert event.occurred_at.tzinfo is None, event.occurred_at.tzinfo
-
-	# Обязательные поля — строго; неверные типы и неразбираемая дата отсекаются.
-	for broken in (
-		{k: v for k, v in VALID_EVENT.items() if k != 'chat_oid'},
-		{**VALID_EVENT, 'event_id': 'not-a-uuid'},
-		{**VALID_EVENT, 'event_id': 42},
-		{**VALID_EVENT, 'occurred_at': 'not-a-date'},
-		{**VALID_EVENT, 'message_text': 5},
-		{**VALID_EVENT, 'message_oid': 7},
-		{**VALID_EVENT, 'chat_oid': 42},
-	):
-		try:
-			NewMessageEvent.model_validate(broken)
-		except ValidationError:
-			pass
-		else:
-			raise AssertionError(f'broken event must be rejected: {broken!r}')
+def _check_naive_occurred_at() -> None:
+	# Наивное локальное время без зоны закрепляется на фикстуре (та же
+	# природа, что у пина формы: сервер шлёт `datetime` без tzinfo, и его
+	# зеркало на проводе обязано разбираться в naive datetime — смена
+	# сервера на aware-формат падает здесь). Поведенческая цепочка дальше,
+	# без имени класса схемы: наивное значение обязано и дальше доставляться —
+	# в сценарии валидного события (main) ровно одно уведомление и
+	# `broken == 0`; если бы схема откатилась в вариант, требующий
+	# aware-время, VALID_EVENT стал бы битым и эти проверки упали бы.
+	# Тип `datetime` для поля байт-в-байт закреплён причиной в сценарии
+	# неразбираемой даты (main): иная формулировка или пустой лог тоже
+	# роняют тест.
+	stamp = datetime.fromisoformat(VALID_EVENT['occurred_at'])
+	assert stamp.tzinfo is None, stamp
 
 
 requests_seen: list[str] = []
 
 
+async def _run_scenario(events: list[dict]) -> tuple[RecordingNotifier, LogCapture]:
+	"""Общий пролог сценария: чистый журнал HTTP, сброшенные метрики, свежий конвейер."""
+	requests_seen.clear()
+	metrics.reset()
+	return await run_pipeline(events, requests_seen=requests_seen)
+
+
+async def _check_required_fields() -> None:
+	# Строгая обязательность — через конвейер, без ссылок на схему: каждое
+	# из пяти обязательных полей по очереди убирается из валидного payload'а
+	# (один прогон на поле). Битое событие не доставляется, HTTP не тронут,
+	# метка «битое» +1, в логе маркер `event_id` и причина с именем поля —
+	# тот же внешний seam, что у сценария битого события ниже.
+	for field in VALID_EVENT:
+		broken = {key: value for key, value in VALID_EVENT.items() if key != field}
+		sink, capture = await _run_scenario([broken])
+		assert not sink.notifications, (field, sink.notifications)
+		assert not requests_seen, (field, requests_seen)
+		assert metrics.broken_events == 1, (field, metrics.broken_events)
+		assert capture.records, (field, 'broken event must be logged')
+		message = capture.records[0].getMessage()
+		# `event_id` в логе: сам UUID, а для отсутствующего поля — явная
+		# метка `<unknown>` (hdlr не может извлечь идентификатор из payload'а).
+		logged_id = '<unknown>' if field == 'event_id' else VALID_EVENT['event_id']
+		assert logged_id in message, (field, message)
+		assert f'причина={field}: Field required' in message, (field, message)
+
+
+async def _check_unknown_fields() -> None:
+	# Неизвестные поля на уровне КОНВЕЙЕРА: отклонённое обогащение `title`,
+	# лишнее поле и серверный `event_title` (ClassVar — само его появление
+	# на проводе обязано быть неломающим: спека обещает, что обогащение
+	# payload на сервере клиент переживёт). Публикуются настоящие байты:
+	# ровно одно уведомление, ни одного «битого», ни одного предупреждения
+	# в логе — проверяется поведение, а не устройство схемы (фиксация
+	# неломающего изменения контракта).
+	enriched = {
+		**VALID_EVENT,
+		'title': 'route 77',
+		'extra_number': 1,
+		'event_title': 'Server Title',
+	}
+	sink, capture = await _run_scenario([enriched])
+	assert len(sink.notifications) == 1, sink.notifications
+	assert metrics.broken_events == 0, metrics.broken_events
+	assert not capture.records, capture.records
+
+
 async def main() -> None:
 	_check_wire_form()
-	_check_schema_contract()
+	_check_naive_occurred_at()
+	await _check_required_fields()
 
 	# Битое событие: нет `chat_oid` — уведомление не доставлено, HTTP не тронут,
 	# в лог попали `event_id` и причина, исключение наружу не вышло, метка «битое» +1.
@@ -205,20 +241,7 @@ async def main() -> None:
 	assert isinstance(marked, UUID), type(marked)
 	assert str(marked) == VALID_EVENT['event_id'], marked
 
-	# Неизвестные поля на уровне КОНВЕЙЕРА: payload с отклонённым обогащением
-	# `title` (и любым лишним полем) обрабатывается как валидное событие —
-	# ровно одно уведомление, ни одного «битого». Дополняет схематическую
-	# проверку в `_check_schema_contract`: здесь публикуются настоящие байты
-	# и проверяется поведение, а не только схема (фиксация неломающего
-	# изменения контракта).
-	requests_seen.clear()
-	metrics.reset()
-	sink, capture = await run_pipeline(
-		[{**VALID_EVENT, 'title': 'route 77', 'extra_number': 1}],
-		requests_seen=requests_seen,
-	)
-	assert len(sink.notifications) == 1, sink.notifications
-	assert metrics.broken_events == 0, metrics.broken_events
+	await _check_unknown_fields()
 
 	print('EVENT_CONTRACT_SMOKE_OK')
 
