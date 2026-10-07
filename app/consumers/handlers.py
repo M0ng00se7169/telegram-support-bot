@@ -4,10 +4,12 @@ from dishka.integrations.faststream import (
 )
 from faststream.kafka import KafkaRouter
 from settings import get_settings
-from telegram import Bot
 
 from consumers.schemas import NewChatMessageSchema
-from services.replies import BaseReplyRegistry
+from services.notifier import (
+	BaseNotifier,
+	NewMessageNotification,
+)
 from services.web import BaseChatDirectory
 
 
@@ -20,8 +22,7 @@ router = KafkaRouter()
 async def new_message_subscription_handler(
 	message: NewChatMessageSchema,
 	directory: FromDishka[BaseChatDirectory],
-	bot: FromDishka[Bot],
-	reply_registry: FromDishka[BaseReplyRegistry],
+	notifier: FromDishka[BaseNotifier],
 ):
 	# Реальный продюсер кладёт в key event_id, а не chat_oid:
 	# единственный надёжный источник chat_oid — payload события.
@@ -29,17 +30,16 @@ async def new_message_subscription_handler(
 
 	listeners = await directory.get_chat_listeners(chat_oid=chat_oid)
 	chat_info = await directory.get_chat_info(chat_oid=chat_oid)
+	notification = NewMessageNotification(
+		chat_oid=chat_oid,
+		title=chat_info.title,
+		text=message.message_text,
+	)
 
 	for listener in listeners:
-		sent_message = await bot.send_message(
-			chat_id=listener.oid,
-			text=(
-				f'New message in chat <b>{chat_info.title}</b>'
-				f'<blockquote>{message.message_text}</blockquote>'
-			),
-			parse_mode='HTML',
-		)
-		await reply_registry.remember(
-			message_id=sent_message.message_id,
-			chat_oid=chat_oid,
+		# Формат уведомления, parse_mode и запись в Reply Registry — забота
+		# Notifier'а; здесь остаётся только бизнес-факт: кому и о чём сообщать.
+		await notifier.notify_new_message(
+			tg_chat_id=listener.oid,
+			notification=notification,
 		)
