@@ -24,35 +24,39 @@ from types import SimpleNamespace  # noqa: E402
 
 import httpx  # noqa: E402
 from dishka import (  # noqa: E402
-	make_async_container,
-	provide,
-	Provider,
-	Scope,
+    make_async_container,
+    provide,
+    Provider,
+    Scope,
 )
 from dishka.integrations.faststream import setup_dishka  # noqa: E402
 from faststream import FastStream  # noqa: E402
 from faststream.kafka import (  # noqa: E402
-	KafkaBroker,
-	TestKafkaBroker,
+    KafkaBroker,
+    TestKafkaBroker,
 )
 from httpx import (  # noqa: E402
-	AsyncClient,
-	MockTransport,
-	Response,
+    AsyncClient,
+    MockTransport,
+    Response,
+)
+from notifier_fakes import (  # noqa: E402
+    assert_single_notification,
+    notifier_override_provider,
+    RecordingNotifier,
 )
 from settings import get_settings  # noqa: E402
 
 from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
-from notifier_fakes import (  # noqa: E402
-	RecordingNotifier,
-	assert_single_notification,
-	notifier_override_provider,
+from services.dedup import (  # noqa: E402
+    BaseEventDeduplicator,
+    InMemoryEventDeduplicator,
 )
 from services.notifier import NewMessageNotification  # noqa: E402
 from services.replies import (  # noqa: E402
-	BaseReplyRegistry,
-	InMemoryReplyRegistry,
+    BaseReplyRegistry,
+    InMemoryReplyRegistry,
 )
 
 
@@ -81,6 +85,11 @@ class _OfflineProvider(Provider):
 	@provide(scope=Scope.APP)
 	def get_reply_registry(self) -> BaseReplyRegistry:
 		return REGISTRY_OVERRIDE_VALUE
+
+	# Карточка №5, билет 02: в оффлайне дедупликатор живёт в памяти.
+	@provide(scope=Scope.APP)
+	def get_event_deduplicator(self) -> BaseEventDeduplicator:
+		return InMemoryEventDeduplicator()
 
 
 class _FakeContext:
@@ -116,8 +125,8 @@ async def main() -> None:
 	async with TestKafkaBroker(broker) as test_broker:
 		await test_broker.publish(
 			{
-				'event_id': 'e1',
-				'occurred_at': '2026-10-07T00:00:00Z',
+				'event_id': '12345678-1234-5678-1234-567812345678',
+				'occurred_at': '2026-10-07T00:00:00',
 				'message_text': 'hello from route 77',
 				'message_oid': 'm1',
 				'chat_oid': CHAT_OID,

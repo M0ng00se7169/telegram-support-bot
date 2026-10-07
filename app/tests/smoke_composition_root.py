@@ -19,36 +19,40 @@ import asyncio  # noqa: E402
 
 import httpx  # noqa: E402
 from dishka import (  # noqa: E402
-	make_async_container,
-	provide,
-	Provider,
-	Scope,
+    make_async_container,
+    provide,
+    Provider,
+    Scope,
 )
 from dishka.integrations.faststream import setup_dishka  # noqa: E402
 from faststream import FastStream  # noqa: E402
 from faststream.kafka import (  # noqa: E402
-	KafkaBroker,
-	TestKafkaBroker,
+    KafkaBroker,
+    TestKafkaBroker,
 )
 from httpx import (  # noqa: E402
-	AsyncClient,
-	MockTransport,
-	Response,
+    AsyncClient,
+    MockTransport,
+    Response,
+)
+from notifier_fakes import (  # noqa: E402
+    assert_single_notification,
+    notifier_override_provider,
+    RecordingNotifier,
 )
 from settings import get_settings  # noqa: E402
 
 from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
-from notifier_fakes import (  # noqa: E402
-	RecordingNotifier,
-	assert_single_notification,
-	notifier_override_provider,
-)
-from services.replies import (  # noqa: E402
-	BaseReplyRegistry,
-	InMemoryReplyRegistry,
+from services.dedup import (  # noqa: E402
+    BaseEventDeduplicator,
+    InMemoryEventDeduplicator,
 )
 from services.notifier import NewMessageNotification  # noqa: E402
+from services.replies import (  # noqa: E402
+    BaseReplyRegistry,
+    InMemoryReplyRegistry,
+)
 
 
 class OfflineProvider(Provider):
@@ -57,6 +61,11 @@ class OfflineProvider(Provider):
 	@provide(scope=Scope.APP)
 	def get_reply_registry(self) -> BaseReplyRegistry:
 		return InMemoryReplyRegistry()
+
+	# Card #5, ticket 02: deduplicator rides the in-memory backend offline.
+	@provide(scope=Scope.APP)
+	def get_event_deduplicator(self) -> BaseEventDeduplicator:
+		return InMemoryEventDeduplicator()
 
 	@provide(scope=Scope.REQUEST)
 	def get_http_client(self) -> AsyncClient:
@@ -93,15 +102,15 @@ async def main() -> None:
 	async with TestKafkaBroker(broker) as test_broker:
 		await test_broker.publish(
 			{
-				'event_id': 'e1',
-				'occurred_at': '2026-10-06T00:00:00Z',
+				'event_id': '12345678-1234-5678-1234-567812345678',
+				'occurred_at': '2026-10-06T00:00:00',
 				'message_text': 'hello',
 				'message_oid': 'm1',
 				'chat_oid': 'chat-oid',
 			},
 			topic=settings.NEW_MESSAGE_TOPIC,
 			key=b'chat-oid',
-		)
+  )
 
 	assert_single_notification(
 		sink,

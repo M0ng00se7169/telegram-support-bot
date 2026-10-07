@@ -28,44 +28,48 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import asyncio  # noqa: E402
 
 import httpx  # noqa: E402
-from markdown_v2 import assert_valid_markdownv2  # noqa: E402
 from dishka import (  # noqa: E402
-	make_async_container,
-	provide,
-	Provider,
-	Scope,
+    make_async_container,
+    provide,
+    Provider,
+    Scope,
 )
 from dishka.integrations.faststream import setup_dishka  # noqa: E402
 from faststream import FastStream  # noqa: E402
 from faststream.kafka import (  # noqa: E402
-	KafkaBroker,
-	TestKafkaBroker,
+    KafkaBroker,
+    TestKafkaBroker,
 )
 from httpx import (  # noqa: E402
-	AsyncClient,
-	MockTransport,
-	Response,
+    AsyncClient,
+    MockTransport,
+    Response,
+)
+from markdown_v2 import assert_valid_markdownv2  # noqa: E402
+from notifier_fakes import (  # noqa: E402
+    assert_single_notification,
+    notifier_override_provider,
+    RecordingNotifier,
 )
 from settings import get_settings  # noqa: E402
 from telegram_transport import (  # noqa: E402
-	offline_telegram_provider,
-	OfflineTelegramTransport,
+    offline_telegram_provider,
+    OfflineTelegramTransport,
 )
 
 from containers.providers import DefaultProvider  # noqa: E402
 from dtos.messages import ChatListItemDTO  # noqa: E402
-from notifier_fakes import (  # noqa: E402
-	RecordingNotifier,
-	assert_single_notification,
-	notifier_override_provider,
+from services.dedup import (  # noqa: E402
+    BaseEventDeduplicator,
+    InMemoryEventDeduplicator,
 )
 from services.notifier import (  # noqa: E402
-	BaseNotifier,
-	NewMessageNotification,
+    BaseNotifier,
+    NewMessageNotification,
 )
 from services.replies import (  # noqa: E402
-	BaseReplyRegistry,
-	InMemoryReplyRegistry,
+    BaseReplyRegistry,
+    InMemoryReplyRegistry,
 )
 
 
@@ -87,11 +91,11 @@ MARKDOWN_ODD_OID = r'a\b`c-d.e'
 MARKDOWN_ODD_OID_ESCAPED = r'a\\b\`c-d.e'
 
 _EVENT = {
-	'event_id': 'e-notifier',
-	'occurred_at': '2026-10-07T00:00:00Z',
-	'message_text': HOSTILE_TEXT,
-	'message_oid': 'm-notifier',
-	'chat_oid': CHAT_OID,
+    'event_id': '12345678-1234-5678-1234-567812345678',
+    'occurred_at': '2026-10-07T00:00:00',
+    'message_text': HOSTILE_TEXT,
+    'message_oid': 'm-notifier',
+    'chat_oid': CHAT_OID,
 }
 
 
@@ -136,6 +140,11 @@ async def _smoke_kafka_to_notifier(chat_payload: dict, listener_oid: str) -> Non
 		def get_reply_registry(self) -> BaseReplyRegistry:
 			return InMemoryReplyRegistry()
 
+		# Карточка №5, билет 02: в оффлайне дедупликатор живёт в памяти.
+		@provide(scope=Scope.APP)
+		def get_event_deduplicator(self) -> BaseEventDeduplicator:
+			return InMemoryEventDeduplicator()
+
 	container = make_async_container(
 		DefaultProvider(),
 		_http_provider(chat_payload, listener_oid),
@@ -172,6 +181,11 @@ async def _smoke_real_notifier_over_transport(
 		@provide(scope=Scope.APP)
 		def get_reply_registry(self) -> BaseReplyRegistry:
 			return registry
+
+		# Карточка №5, билет 02: в оффлайне дедупликатор живёт в памяти.
+		@provide(scope=Scope.APP)
+		def get_event_deduplicator(self) -> BaseEventDeduplicator:
+			return InMemoryEventDeduplicator()
 
 	container = make_async_container(
 		DefaultProvider(),
