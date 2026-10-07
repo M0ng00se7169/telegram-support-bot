@@ -14,7 +14,12 @@
   сообщение в тот же чат новых запросов не делает;
 - холодный старт без прогрева: уведомление всё равно содержит заголовок;
 - отсутствующий или недоступный заголовок не подавляет уведомление:
-  `get_title` возвращает `chat_oid` запасным заголовком и не бросает;
+  `get_title` возвращает `chat_oid` запасным заголовком и не бросает при
+  граничных ошибках Web API/парсинга;
+- программный баг (не ошибка границы) внутри `warm_up`/`get_title`
+  НЕ маскируется под фолбэк/предупреждение — исключение всплывает
+  (ADR-0004), а хук `warm_title_cache` на старте — широкая страховка:
+  ловит всё и продолжает подписку с отдельным сообщением в логе (п. 11);
 - hot path: для тёплого кэша на событие о сообщении ровно один HTTP-запрос —
   за listener'ами.
 
@@ -63,6 +68,10 @@ from consumers.schemas import (  # noqa: E402
     NewChatCreatedEvent,
 )
 from containers.providers import DefaultProvider  # noqa: E402
+from dtos.messages import (  # noqa: E402
+    ChatListenerDTO,
+    ChatListItemDTO,
+)
 from services.title_cache import ChatTitleCache  # noqa: E402
 from services.web import BaseChatDirectory  # noqa: E402
 
@@ -100,12 +109,18 @@ def _transport_provider(
 	*,
 	chat_list_status: int = 200,
 	chat_info_status: int = 200,
+	chat_list_malformed: bool = False,
+	chat_info_malformed: bool = False,
 ) -> Provider:
 	"""MockTransport с журналом запросов и умением ломать выбранные пути.
 
 	Общий `offline_provider` отвечает на GET /chat/ одиночным объектом —
 	конверта `{'items': [...], 'count': N}` у него нет, поэтому прогреву
 	нужен собственный обработчик (см. gotcha в общем каркасе).
+
+	`chat_list_malformed`/`chat_info_malformed` — 200 с телом, которое не
+	проходит DTO: такое тело даёт `ValidationError` парсинга, то есть
+	граничный сбой (наравне с `WebApiError`), а не программный баг.
 	"""
 	class TransportProvider(Provider):
 		@provide(scope=Scope.REQUEST)
@@ -118,6 +133,14 @@ def _transport_provider(
 							chat_list_status,
 							json={'detail': 'chat list down'},
 						)
+					if chat_list_malformed:
+						return Response(
+							200,
+							json={
+								'items': [{'oid': 5, 'title': 7, 'created_at': 'not-a-date'}],
+								'count': 1,
+							},
+						)
 					return Response(
 						200,
 						json={'items': WARMED_ITEMS, 'count': len(WARMED_ITEMS)},
@@ -126,11 +149,55 @@ def _transport_provider(
 					return Response(200, json=[{'oid': '42'}])
 				if chat_info_status != 200:
 					return Response(chat_info_status, json={'detail': 'Chat not found'})
+				if chat_info_malformed:
+					return Response(200, json={'oid': 5, 'title': 7, 'created_at': 'not-a-date'})
 				return Response(200, json=CHAT_INFO)
 
 			return AsyncClient(transport=MockTransport(handler))
 
 	return TransportProvider()
+
+
+class _BrokenDirectory(BaseChatDirectory):
+	"""Стаб границы, падающий TypeError — программный баг, а не ошибка Web API.
+
+	Нужен, чтобы отличить «граничный сбой → фолбэк/предупреждение» от
+	«баг → исключение всплывает» (ADR-0004: баг не должен маскироваться
+	под штатное поведение).
+	"""
+
+	def __init__(self, failing_method: str) -> None:
+		self._failing_method = failing_method
+
+	async def get_all_chats(self) -> list[ChatListItemDTO]:
+		if self._failing_method == 'get_all_chats':
+			raise TypeError('programming bug inside directory')
+		return []
+
+	async def get_chat_listeners(self, chat_oid: str) -> list[ChatListenerDTO]:
+		return []
+
+	async def add_listener(self, telegram_chat_id: int, chat_oid: str) -> None:
+		return None
+
+	async def get_chat_info(self, chat_oid: str) -> ChatListItemDTO:
+		if self._failing_method == 'get_chat_info':
+			raise TypeError('programming bug inside directory')
+		raise AssertionError('стаб не ожидал get_chat_info')
+
+
+def _buggy_directory_provider() -> Provider:
+	"""Поздний провайдер перекрывает BaseChatDirectory сломанным стабом.
+
+	В dishka поздний провайдер выигрывает — тот же приём, что в
+	`run_pipeline` для транспорта.
+	"""
+	class BuggyDirectoryProvider(Provider):
+		@provide(scope=Scope.REQUEST)
+		def get_chat_directory(self) -> BaseChatDirectory:
+			return _BrokenDirectory('get_all_chats')
+
+	return BuggyDirectoryProvider()
 
 
 def _check_settings_defaults() -> None:
@@ -419,6 +486,8 @@ async def _check_deleted_event_suppresses_notification() -> None:
 async def _check_broken_lifecycle_event_is_logged() -> None:
 	# Битое событие жизненного цикла не роняет consumer'а: лог с причиной,
 	# метка «битое», конвейер продолжает работать (п. «невалидный payload»).
+	# Точная формулировка закреплена: общий хелпер обязан сохранять её
+	# байт-в-байт для каждого потока (new-message/chat-created/chat-deleted).
 	requests: list[str] = []
 	metrics.reset()
 	broken = {key: value for key, value in CREATED_EVENT.items() if key != 'chat_title'}
@@ -429,12 +498,119 @@ async def _check_broken_lifecycle_event_is_logged() -> None:
 	)
 	assert metrics.broken_events == 1, metrics.broken_events
 	assert capture.records, 'broken lifecycle event must be logged'
+	broken_logs = [
+		record.getMessage()
+		for record in capture.records
+		if record.getMessage().startswith('Битое событие')
+	]
+	assert broken_logs == [
+		'Битое событие chat-created отсеяно: '
+		'event_id=12345678-1234-5678-1234-567812345678 причина=chat_title: Field required',
+	], broken_logs
 	messages = ' | '.join(record.getMessage() for record in capture.records)
 	assert 'chat_title' in messages, messages
 	# Сообщение дошло несмотря на битое событие — заголовок добран read-through'ом.
 	assert len(sink.notifications) == 1, sink.notifications
 	_tg_chat_id, notification = sink.notifications[0]
 	assert notification.title == 'chat title', notification.title
+
+
+async def _check_get_title_propagates_programming_bug() -> None:
+	# F1: TypeError — программный баг, а не граничный сбой: он НЕ должен
+	# превращаться в chat_oid-заглушку. Ловятся только WebApiError и
+	# ValidationError парсинга; прочее всплывает (ADR-0004 — не маскировать).
+	cache = ChatTitleCache()
+	try:
+		await cache.get_title('chat-oid', _BrokenDirectory('get_chat_info'))
+	except TypeError:
+		pass
+	else:
+		raise AssertionError('programming bug inside get_title must propagate')
+
+
+async def _check_warm_up_propagates_programming_bug() -> None:
+	# F1: то же для warm_up: баг всплывает наружу, широкая страховка от
+	# любого падения живёт отдельным слоем — в warm_title_cache (п. 11).
+	cache = ChatTitleCache()
+	try:
+		await cache.warm_up(_BrokenDirectory('get_all_chats'))
+	except TypeError:
+		pass
+	else:
+		raise AssertionError('programming bug inside warm_up must propagate')
+
+
+async def _check_startup_hook_swallows_bug_with_distinct_log() -> None:
+	# F2: хук warm_title_cache — широкая страховка: ловит ВСЁ, включая баги,
+	# всплывшие из warm_up, и отказы DI — подписка не блокируется (п. 11).
+	# Сообщение обязано отличаться от внутреннего («…не удался»), явно
+	# заявлять продолжение подписки и нести исключение с трейсбеком.
+	capture = LogCapture()
+	main_logger = logging.getLogger('consumers.main')
+	main_logger.addHandler(capture)
+	container = make_async_container(
+		DefaultProvider(),
+		_buggy_directory_provider(),
+	)
+	try:
+		await warm_title_cache(container)  # не должно упасть
+	finally:
+		main_logger.removeHandler(capture)
+		await container.close()
+	assert capture.records, 'startup hook must log the failure'
+	record = capture.records[0]
+	message = record.getMessage()
+	assert 'Прогрев Chat Title Cache не удался' not in message, message
+	assert 'подписка продолжается' in message, message
+	assert record.exc_info is not None, 'failure must travel with traceback'
+
+
+async def _check_malformed_warmup_list_is_boundary_failure() -> None:
+	# Охрана F1: 200 с битым телом списка — ValidationError парсинга DTO,
+	# то есть граничный сбой: тонкий warm_up логирует и не пробрасывает
+	# (ловится именно им, а не только внешним хуком).
+	requests: list[str] = []
+	capture = LogCapture()
+	title_cache_logger = logging.getLogger('services.title_cache')
+	title_cache_logger.addHandler(capture)
+	container = make_async_container(
+		DefaultProvider(),
+		_transport_provider(requests, chat_list_malformed=True),
+	)
+	try:
+		async with container() as scope:
+			cache = await scope.get(ChatTitleCache)
+			directory = await scope.get(BaseChatDirectory)
+			await cache.warm_up(directory)  # не должно упасть
+		assert capture.records, 'malformed warmup body must be logged as warning'
+		assert requests == ['GET /chat/'], requests
+	finally:
+		title_cache_logger.removeHandler(capture)
+		await container.close()
+
+
+async def _check_malformed_chat_info_falls_back() -> None:
+	# Охрана F1: битое тело GET /chat/{oid}/ — ValidationError парсинга,
+	# get_title ловит его наравне с WebApiError: chat_oid запасным + warning.
+	requests: list[str] = []
+	capture = LogCapture()
+	title_cache_logger = logging.getLogger('services.title_cache')
+	title_cache_logger.addHandler(capture)
+	container = make_async_container(
+		DefaultProvider(),
+		_transport_provider(requests, chat_info_malformed=True),
+	)
+	try:
+		async with container() as scope:
+			cache = await scope.get(ChatTitleCache)
+			directory = await scope.get(BaseChatDirectory)
+			title = await cache.get_title('chat-oid', directory)
+		assert title == 'chat-oid', title
+		assert requests == ['GET /chat/chat-oid/'], requests
+		assert capture.records, 'malformed chat info must be logged as warning'
+	finally:
+		title_cache_logger.removeHandler(capture)
+		await container.close()
 
 
 async def main() -> None:
@@ -451,6 +627,11 @@ async def main() -> None:
 	await _check_created_event_keeps_cache_warm()
 	await _check_deleted_event_suppresses_notification()
 	await _check_broken_lifecycle_event_is_logged()
+	await _check_get_title_propagates_programming_bug()
+	await _check_warm_up_propagates_programming_bug()
+	await _check_startup_hook_swallows_bug_with_distinct_log()
+	await _check_malformed_warmup_list_is_boundary_failure()
+	await _check_malformed_chat_info_falls_back()
 
 	print('TITLE_CACHE_SMOKE_OK')
 

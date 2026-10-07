@@ -86,6 +86,12 @@ async def main() -> None:
 	message = capture.records[0].getMessage()
 	assert '12345678-1234-5678-1234-567812345678' in message, message
 	assert 'chat_oid' in message, message
+	# Формулировка байт-в-байт закреплена: общий хелпер битого payload'а
+	# обязан сохранять её для new-message (рефакторинг дедупликации блока).
+	assert message == (
+		'Битое событие new-message отсеяно: '
+		'event_id=12345678-1234-5678-1234-567812345678 причина=chat_oid: Field required'
+	), message
 
 	# Битый `event_id`: логируется сырое значение, не UUID.
 	requests_seen.clear()
