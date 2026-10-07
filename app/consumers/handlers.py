@@ -42,8 +42,8 @@ from consumers.schemas import (
 )
 from services.dedup import BaseEventDeduplicator
 from services.notifier import (
-	BaseNotifier,
-	NewMessageNotification,
+    BaseNotifier,
+    NewMessageNotification,
 )
 from services.title_cache import ChatTitleCache
 from services.web import BaseChatDirectory
