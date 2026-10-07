@@ -23,6 +23,7 @@ class ProjectSettings(BaseSettings):
 	NEW_MESSAGE_TOPIC: str = env('NEW_MESSAGE_TOPIC', default='new-messages')
 	KAFKA_GROUP_ID: str = env('KAFKA_GROUP_ID', default='tg-bot')
 	VALKEY_URL: str = env('VALKEY_URL', default='valkey://valkey:6379/0')
+	EVENT_DEDUP_TTL: int = env('EVENT_DEDUP_TTL', default=24 * 60 * 60)
 
 
 @lru_cache(1)

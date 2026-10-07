@@ -59,6 +59,10 @@ from telegram_transport import (  # noqa: E402
 
 from containers.providers import DefaultProvider  # noqa: E402
 from dtos.messages import ChatListItemDTO  # noqa: E402
+from services.dedup import (  # noqa: E402
+    BaseEventDeduplicator,
+    InMemoryEventDeduplicator,
+)
 from services.notifier import (  # noqa: E402
     BaseNotifier,
     NewMessageNotification,
@@ -136,6 +140,11 @@ async def _smoke_kafka_to_notifier(chat_payload: dict, listener_oid: str) -> Non
 		def get_reply_registry(self) -> BaseReplyRegistry:
 			return InMemoryReplyRegistry()
 
+		# Карточка №5, билет 02: в оффлайне дедупликатор живёт в памяти.
+		@provide(scope=Scope.APP)
+		def get_event_deduplicator(self) -> BaseEventDeduplicator:
+			return InMemoryEventDeduplicator()
+
 	container = make_async_container(
 		DefaultProvider(),
 		_http_provider(chat_payload, listener_oid),
@@ -172,6 +181,11 @@ async def _smoke_real_notifier_over_transport(
 		@provide(scope=Scope.APP)
 		def get_reply_registry(self) -> BaseReplyRegistry:
 			return registry
+
+		# Карточка №5, билет 02: в оффлайне дедупликатор живёт в памяти.
+		@provide(scope=Scope.APP)
+		def get_event_deduplicator(self) -> BaseEventDeduplicator:
+			return InMemoryEventDeduplicator()
 
 	container = make_async_container(
 		DefaultProvider(),

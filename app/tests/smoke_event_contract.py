@@ -50,6 +50,10 @@ from consumers.handlers import router  # noqa: E402
 from consumers.metrics import metrics  # noqa: E402
 from consumers.schemas import NewMessageEvent  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
+from services.dedup import (  # noqa: E402
+    BaseEventDeduplicator,
+    InMemoryEventDeduplicator,
+)
 from services.replies import (  # noqa: E402
     BaseReplyRegistry,
     InMemoryReplyRegistry,
@@ -115,6 +119,11 @@ class OfflineProvider(Provider):
 	@provide(scope=Scope.APP)
 	def get_reply_registry(self) -> BaseReplyRegistry:
 		return InMemoryReplyRegistry()
+
+	# Карточка №5, билет 02: в оффлайне дедупликатор живёт в памяти.
+	@provide(scope=Scope.APP)
+	def get_event_deduplicator(self) -> BaseEventDeduplicator:
+		return InMemoryEventDeduplicator()
 
 	@provide(scope=Scope.REQUEST)
 	def get_http_client(self) -> AsyncClient:
