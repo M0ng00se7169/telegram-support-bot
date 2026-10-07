@@ -19,6 +19,7 @@ from services.notifier import (
 	TelegramNotifier,
 )
 from services.replies import BaseReplyRegistry, ValkeyReplyRegistry
+from services.title_cache import ChatTitleCache
 from services.web import (
 	BaseChatDirectory,
 	ChatDirectory,
@@ -68,6 +69,12 @@ class DefaultProvider(Provider):
 			client=Valkey(connection_pool=pool),
 			ttl=settings.EVENT_DEDUP_TTL,
 		)
+
+	# APP-скоуп без зависимостей: Chat Directory (REQUEST-скоуп) кэшу не нужен —
+	# directory передаётся аргументом в warm_up/get_title, поэтому скоупы не смешиваются.
+	@provide(scope=Scope.APP)
+	def get_title_cache(self) -> ChatTitleCache:
+		return ChatTitleCache()
 
 	# APP-скоуп: внутри Notifier'а живёт `Bot`, он тоже APP-скоуп.
 	@provide(scope=Scope.APP)

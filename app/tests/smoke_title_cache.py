@@ -34,13 +34,31 @@ import os
 os.environ.setdefault('TG_BOT_TOKEN', '123456:TEST-TOKEN')
 
 import asyncio  # noqa: E402
+import logging  # noqa: E402
 
+import httpx  # noqa: E402
+from dishka import (  # noqa: E402
+    make_async_container,
+    provide,
+    Provider,
+    Scope,
+)
+from httpx import (  # noqa: E402
+    AsyncClient,
+    MockTransport,
+    Response,
+)
 from settings import get_settings  # noqa: E402
+from subscription_pipeline import LogCapture  # noqa: E402
 
+from consumers.main import warm_title_cache  # noqa: E402
 from consumers.schemas import (  # noqa: E402
     ChatDeletedEvent,
     NewChatCreatedEvent,
 )
+from containers.providers import DefaultProvider  # noqa: E402
+from services.title_cache import ChatTitleCache  # noqa: E402
+from services.web import BaseChatDirectory  # noqa: E402
 
 
 # Payload'ы ровно в той форме, в которой их публикует серверный outbox relay
@@ -57,6 +75,56 @@ DELETED_EVENT = {
 	'occurred_at': '2026-10-07T00:00:00',
 	'chat_oid': 'chat-oid',
 }
+
+# Заголовки, которые сервер отдаёт на GET /chat/ (конверт `items`/`count`).
+WARMED_ITEMS = [
+	{'oid': 'chat-oid', 'title': 'Warmed Title', 'created_at': '2026-01-01T00:00:00Z'},
+]
+
+# Ответ GET /chat/{oid}/ — тот же, что отдаёт общий `offline_provider`.
+CHAT_INFO = {
+	'oid': 'chat-oid',
+	'title': 'chat title',
+	'created_at': '2026-01-01T00:00:00Z',
+}
+
+
+def _transport_provider(
+	requests_seen: list[str],
+	*,
+	chat_list_status: int = 200,
+	chat_info_status: int = 200,
+) -> Provider:
+	"""MockTransport с журналом запросов и умением ломать выбранные пути.
+
+	Общий `offline_provider` отвечает на GET /chat/ одиночным объектом —
+	конверта `{'items': [...], 'count': N}` у него нет, поэтому прогреву
+	нужен собственный обработчик (см. gotcha в общем каркасе).
+	"""
+	class TransportProvider(Provider):
+		@provide(scope=Scope.REQUEST)
+		def get_http_client(self) -> AsyncClient:
+			def handler(request: httpx.Request) -> Response:
+				requests_seen.append(f'{request.method} {request.url.path}')
+				if request.url.path == '/chat/':
+					if chat_list_status != 200:
+						return Response(
+							chat_list_status,
+							json={'detail': 'chat list down'},
+						)
+					return Response(
+						200,
+						json={'items': WARMED_ITEMS, 'count': len(WARMED_ITEMS)},
+					)
+				if request.url.path.endswith('/listeners/'):
+					return Response(200, json=[{'oid': '42'}])
+				if chat_info_status != 200:
+					return Response(chat_info_status, json={'detail': 'Chat not found'})
+				return Response(200, json=CHAT_INFO)
+
+			return AsyncClient(transport=MockTransport(handler))
+
+	return TransportProvider()
 
 
 def _check_settings_defaults() -> None:
@@ -133,9 +201,113 @@ def _check_chat_event_schemas() -> None:
 			raise AssertionError(f'broken deleted event must be rejected: {broken!r}')
 
 
+async def _check_warmup_fills_cache() -> None:
+	# Прогрев при старте — ровно один запрос за список чатов; после прогрева
+	# get_title отдаёт заголовок warmed-чата с нулём дополнительных запросов.
+	requests: list[str] = []
+	container = make_async_container(
+		DefaultProvider(),
+		_transport_provider(requests),
+	)
+	try:
+		await warm_title_cache(container)
+		assert requests == ['GET /chat/'], requests
+
+		async with container() as scope:
+			cache = await scope.get(ChatTitleCache)
+			directory = await scope.get(BaseChatDirectory)
+			title = await cache.get_title('chat-oid', directory)
+		assert title == 'Warmed Title', title
+		assert requests == ['GET /chat/'], requests  # кэш тёплый: 0 HTTP
+	finally:
+		await container.close()
+
+
+async def _check_warmup_failure_is_not_fatal() -> None:
+	# Сбой прогрева (Web API отвечает 500) не пробрасывается наружу и
+	# логируется предупреждением; кэш остаётся пустым и добирает заголовок
+	# точечным read-through'ом при первом же обращении.
+	requests: list[str] = []
+	capture = LogCapture()
+	title_cache_logger = logging.getLogger('services.title_cache')
+	title_cache_logger.addHandler(capture)
+	container = make_async_container(
+		DefaultProvider(),
+		_transport_provider(requests, chat_list_status=500),
+	)
+	try:
+		await warm_title_cache(container)  # не должно упасть
+		assert requests == ['GET /chat/'], requests
+		assert capture.records, 'warmup failure must be logged as warning'
+
+		async with container() as scope:
+			cache = await scope.get(ChatTitleCache)
+			directory = await scope.get(BaseChatDirectory)
+			title = await cache.get_title('chat-oid', directory)
+		assert title == 'chat title', title  # добыт read-through'ом
+		assert requests == ['GET /chat/', 'GET /chat/chat-oid/'], requests
+	finally:
+		title_cache_logger.removeHandler(capture)
+		await container.close()
+
+
+async def _check_tombstone_and_remember() -> None:
+	# Удалённый чат: get_title -> None и ни одного HTTP-запроса — пропуск идёт
+	# ДО любого обращения к Web API. Событие создания снимает tombstone:
+	# заголовок снова доступен, тоже без HTTP.
+	requests: list[str] = []
+	container = make_async_container(
+		DefaultProvider(),
+		_transport_provider(requests),
+	)
+	try:
+		async with container() as scope:
+			cache = await scope.get(ChatTitleCache)
+			directory = await scope.get(BaseChatDirectory)
+
+			cache.forget('chat-oid')
+			assert await cache.get_title('chat-oid', directory) is None
+			assert requests == [], requests
+
+			cache.remember('chat-oid', 'Back Again')
+			assert await cache.get_title('chat-oid', directory) == 'Back Again'
+			assert requests == [], requests
+	finally:
+		await container.close()
+
+
+async def _check_fallback_never_suppresses() -> None:
+	# Web API не отдаёт чат (жёсткое удаление без tombstone / сбой):
+	# get_title возвращает сам chat_oid запасным заголовком, логирует
+	# предупреждение и не бросает — «молчание хуже неточности».
+	requests: list[str] = []
+	capture = LogCapture()
+	title_cache_logger = logging.getLogger('services.title_cache')
+	title_cache_logger.addHandler(capture)
+	container = make_async_container(
+		DefaultProvider(),
+		_transport_provider(requests, chat_info_status=500),
+	)
+	try:
+		async with container() as scope:
+			cache = await scope.get(ChatTitleCache)
+			directory = await scope.get(BaseChatDirectory)
+			title = await cache.get_title('chat-oid', directory)
+		assert title == 'chat-oid', title
+		assert requests == ['GET /chat/chat-oid/'], requests
+		assert capture.records, 'fallback must be logged as warning'
+	finally:
+		title_cache_logger.removeHandler(capture)
+		await container.close()
+
+
 async def main() -> None:
 	_check_settings_defaults()
 	_check_chat_event_schemas()
+	await _check_warmup_fills_cache()
+	await _check_warmup_failure_is_not_fatal()
+	await _check_tombstone_and_remember()
+	await _check_fallback_never_suppresses()
 
 	print('TITLE_CACHE_SMOKE_OK')
 

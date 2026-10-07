@@ -1,3 +1,7 @@
+"""Точка входа consumer'а: FastStream-приложение и прогрев Chat Title Cache."""
+
+import logging
+
 from dishka import (
 	AsyncContainer,
 	make_async_container,
@@ -8,8 +12,12 @@ from faststream.kafka.broker import KafkaBroker
 
 from containers.providers import DefaultProvider
 from consumers.handlers import router
+from services.title_cache import ChatTitleCache
+from services.web import BaseChatDirectory
 from settings import get_settings
 
+
+logger = logging.getLogger(__name__)
 
 _container: AsyncContainer | None = None
 
@@ -22,6 +30,24 @@ def get_container() -> AsyncContainer:
 	return _container
 
 
+async def warm_title_cache(container: AsyncContainer) -> None:
+	"""Прогревает Chat Title Cache одним запросом за список чатов.
+
+	Входит в request scope вручную — тот же приём, что `_request_scope` у
+	бота: Chat Directory — REQUEST-скоуп, кэш — APP-скоуп, поэтому directory
+	резолвится в scope'е и передаётся в кэш аргументом. Сбой прогрева
+	(любого типа) логируется предупреждением и не пробрасывается: подписка
+	не должна блокироваться недоступностью Web API.
+	"""
+	try:
+		async with container() as scope:
+			directory = await scope.get(BaseChatDirectory)
+			cache = await scope.get(ChatTitleCache)
+			await cache.warm_up(directory)
+	except Exception as error:
+		logger.warning('Прогрев Chat Title Cache не удался: %s', error)
+
+
 def get_app() -> FastStream:
 	settings = get_settings()
 	broker = KafkaBroker(settings.KAFKA_BROKER_URL)
@@ -29,6 +55,16 @@ def get_app() -> FastStream:
 	app = FastStream(broker=broker)
 
 	# Request scope per incoming message; container closed on after_shutdown.
-	setup_dishka(container=get_container(), app=app)
+	container = get_container()
+	setup_dishka(container=container, app=app)
+
+	# Прогрев кэша — хук on_startup: он выполняется ДО подключения к брокеру,
+	# поэтому кэш прогревается раньше, чем пойдут события, и гонки между
+	# прогревом и подписками жизненного цикла чатов не бывает. Сбой прогрева
+	# не блокирует запуск — warm_title_cache не бросает.
+	async def _warm_title_cache_on_startup() -> None:
+		await warm_title_cache(container)
+
+	app.on_startup(_warm_title_cache_on_startup)
 
 	return app
