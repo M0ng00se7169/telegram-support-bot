@@ -68,12 +68,7 @@ async def new_message_subscription_handler(
 	try:
 		event = NewMessageEvent.model_validate(raw_payload)
 	except ValidationError as error:
-		metrics.record_broken()
-		logger.warning(
-			'Битое событие new-message отсеяно: event_id=%s причина=%s',
-			_extract_event_id(raw_payload),
-			_format_validation_reason(error),
-		)
+		_record_broken_event(raw_payload, error, 'new-message')
 		return
 
 	# Дедупликация — сразу после валидации и строго до любого побочного эффекта:
@@ -134,12 +129,7 @@ async def chat_created_subscription_handler(
 	try:
 		event = NewChatCreatedEvent.model_validate(raw_payload)
 	except ValidationError as error:
-		metrics.record_broken()
-		logger.warning(
-			'Битое событие chat-created отсеяно: event_id=%s причина=%s',
-			_extract_event_id(raw_payload),
-			_format_validation_reason(error),
-		)
+		_record_broken_event(raw_payload, error, 'chat-created')
 		return
 
 	# Дедупликации здесь нет нарочно: remember/forget идемпотентны при
@@ -160,16 +150,33 @@ async def chat_deleted_subscription_handler(
 	try:
 		event = ChatDeletedEvent.model_validate(raw_payload)
 	except ValidationError as error:
-		metrics.record_broken()
-		logger.warning(
-			'Битое событие chat-deleted отсеяно: event_id=%s причина=%s',
-			_extract_event_id(raw_payload),
-			_format_validation_reason(error),
-		)
+		_record_broken_event(raw_payload, error, 'chat-deleted')
 		return
 
 	# См. комментарий выше: tombstone ставится идемпотентно, дедуп не нужна.
 	cache.forget(event.chat_oid)
+
+
+def _record_broken_event(
+	raw_payload: dict,
+	error: ValidationError,
+	stream: str,
+) -> None:
+	"""Считает метку «битое» и логирует битый payload — одна форма на все потоки.
+
+	`stream` — человекочитаемое имя потока (new-message/chat-created/
+	chat-deleted), вставляется в шаблон сообщения; сама формулировка
+	зафиксирована смоуками и обязана сохраняться байт-в-байт. Хелпер делает
+	ровно record + log и ничего больше: `return` из обработчика и его место
+	в контроле потока не меняются.
+	"""
+	metrics.record_broken()
+	logger.warning(
+		'Битое событие %s отсеяно: event_id=%s причина=%s',
+		stream,
+		_extract_event_id(raw_payload),
+		_format_validation_reason(error),
+	)
 
 
 def _extract_event_id(raw_payload: object) -> str:
