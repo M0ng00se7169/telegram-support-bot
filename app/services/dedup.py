@@ -44,6 +44,11 @@ class ValkeyEventDeduplicator(BaseEventDeduplicator):
 		self._client = client
 		self._ttl = ttl
 
+	@property
+	def ttl(self) -> int:
+		"""Время жизни отметки в секундах (приходит из настроек через DI)."""
+		return self._ttl
+
 	async def mark_if_new(self, event_id: UUID) -> bool:
 		# `SET ... EX ... NX` выполняется атомарно на сервере: True — ключа не
 		# было (событие новое), None — ключ уже стоял (дубликат). Признак
