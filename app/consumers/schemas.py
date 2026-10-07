@@ -11,6 +11,12 @@
 Неизвестные поля разрешены: обогащение события на стороне сервера (в том числе
 добавление `title` в payload) должно быть неломающим изменением для уже развёрнутого
 consumer'а. Обязательные поля — строго: событие без них считается битым.
+
+Те же правила воспроизводят зеркала событий жизненного цикла чата:
+`NewChatCreatedEvent` (топик `new-chats-topic`, поле заголовка — `chat_title`,
+как на сервере) и `ChatDeletedEvent` (топик `chat-deleted-topic`, без заголовка).
+Типы, обязательность и терпимость к неизвестным полям — как у New-Message Event;
+наивное `occurred_at` описано в `NewMessageEvent`.
 """
 
 from __future__ import annotations
@@ -44,6 +50,33 @@ class NewMessageEvent(BaseModel):
 	chat_oid: str
 
 
+class NewChatCreatedEvent(BaseModel):
+	"""Зеркало серверного `NewChatCreatedEvent`: единственный серверный источник заголовка.
+
+	На проводе: `event_id`, `occurred_at`, `chat_oid`, `chat_title` — поле
+	заголовка называется `chat_title` именно так (зеркало, не «title»).
+	`occurred_at` — наивное локальное время сервера без зоны: см. комментарий
+	в `NewMessageEvent`, правила те же.
+	"""
+
+	model_config = ConfigDict(extra='allow')
+
+	event_id: UUID
+	occurred_at: datetime
+	chat_oid: str
+	chat_title: str
+
+
+class ChatDeletedEvent(BaseModel):
+	"""Зеркало серверного `ChatDeletedEvent`: удаление чата, заголовка в payload'е нет."""
+
+	model_config = ConfigDict(extra='allow')
+
+	event_id: UUID
+	occurred_at: datetime
+	chat_oid: str
+
+
 # Типы, которые consumer'у нужны без повторной проверки: граница процесса — единственное
 # место, где типы могут быть ложными. После валидации `event_id` — `UUID`,
 # `occurred_at` — `datetime`, `chat_oid` — `str`.
@@ -52,6 +85,8 @@ OccurredAt = datetime
 
 __all__ = (
 	'NewMessageEvent',
+	'NewChatCreatedEvent',
+	'ChatDeletedEvent',
 	'EventId',
 	'OccurredAt',
 	'ValidationError',
