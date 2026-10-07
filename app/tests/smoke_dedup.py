@@ -14,6 +14,8 @@
   повторное событие снова отсекается; это же покрывает переработку backlog'а
   outbox: redelivered строки — это дубликаты).
 
+Общий каркас конвейера (payload, логи, запуск) — `subscription_pipeline.py`.
+
 Запуск:  python tests/smoke_dedup.py   (из каталога app/)
 Для Valkey-сценария:  VALKEY_URL=valkey://localhost:6379/0
 """
@@ -31,68 +33,25 @@ import os
 os.environ.setdefault('TG_BOT_TOKEN', '123456:TEST-TOKEN')
 
 import asyncio  # noqa: E402
-import logging  # noqa: E402
 import uuid  # noqa: E402
 
-import httpx  # noqa: E402
-from dishka import (  # noqa: E402
-    make_async_container,
-    provide,
-    Provider,
-    Scope,
-)
-from dishka.integrations.faststream import setup_dishka  # noqa: E402
-from faststream import FastStream  # noqa: E402
-from faststream.kafka import (  # noqa: E402
-    KafkaBroker,
-    TestKafkaBroker,
-)
-from httpx import (  # noqa: E402
-    AsyncClient,
-    MockTransport,
-    Response,
-)
-from notifier_fakes import (  # noqa: E402
-    notifier_override_provider,
-    RecordingNotifier,
-)
 from settings import get_settings  # noqa: E402
+from subscription_pipeline import (  # noqa: E402
+    run_pipeline,
+    VALID_EVENT,
+)
 from valkey.asyncio import Valkey  # noqa: E402
 
-from consumers.handlers import router  # noqa: E402
 from consumers.metrics import metrics  # noqa: E402
-from containers.providers import DefaultProvider  # noqa: E402
 from services.dedup import (  # noqa: E402
-    BaseEventDeduplicator,
     EVENT_DEDUP_PREFIX,
     EVENT_DEDUP_TTL,
     InMemoryEventDeduplicator,
     ValkeyEventDeduplicator,
 )
-from services.replies import (  # noqa: E402
-    BaseReplyRegistry,
-    InMemoryReplyRegistry,
-)
 
-
-VALID_EVENT = {
-	'event_id': '12345678-1234-5678-1234-567812345678',
-	'occurred_at': '2026-10-07T00:00:00',
-	'message_text': 'hello',
-	'message_oid': 'm1',
-	'chat_oid': 'chat-oid',
-}
 
 CONCURRENCY = 50
-
-
-class _LogCapture(logging.Handler):
-	def __init__(self) -> None:
-		super().__init__()
-		self.records: list[logging.LogRecord] = []
-
-	def emit(self, record: logging.LogRecord) -> None:
-		self.records.append(record)
 
 
 def _check_settings_default() -> None:
@@ -159,83 +118,17 @@ async def _check_valkey_backend() -> None:
 		await client.aclose()
 
 
-def _pipeline_providers(
-	dedup: BaseEventDeduplicator,
-	requests_seen: list[str],
-) -> Provider:
-	class OfflineProvider(Provider):
-		@provide(scope=Scope.APP)
-		def get_reply_registry(self) -> BaseReplyRegistry:
-			return InMemoryReplyRegistry()
-
-		@provide(scope=Scope.APP)
-		def get_event_deduplicator(self) -> BaseEventDeduplicator:
-			return dedup
-
-		@provide(scope=Scope.REQUEST)
-		def get_http_client(self) -> AsyncClient:
-			def transport_handler(request: httpx.Request) -> Response:
-				requests_seen.append(f'{request.method} {request.url.path}')
-				if request.url.path.endswith('/listeners/'):
-					return Response(200, json=[{'oid': '42'}])
-				return Response(
-					200,
-					json={
-						'oid': 'chat-oid',
-						'title': 'chat title',
-						'created_at': '2026-01-01T00:00:00Z',
-					},
-				)
-
-			return AsyncClient(transport=MockTransport(transport_handler))
-
-	return OfflineProvider()
-
-
-async def _run_pipeline(
-	events: list[dict],
-	dedup: BaseEventDeduplicator,
-	requests_seen: list[str],
-) -> tuple[RecordingNotifier, _LogCapture]:
-	settings = get_settings()
-	sink = RecordingNotifier()
-
-	broker = KafkaBroker(settings.KAFKA_BROKER_URL)
-	broker.include_router(router=router)
-	app = FastStream(broker=broker)
-
-	container = make_async_container(
-		DefaultProvider(),
-		_pipeline_providers(dedup, requests_seen),
-		notifier_override_provider(sink),
-	)
-	setup_dishka(container, app)
-
-	capture = _LogCapture()
-	consumer_logger = logging.getLogger('consumers.handlers')
-	consumer_logger.addHandler(capture)
-	consumer_logger.setLevel(logging.WARNING)
-
-	async with TestKafkaBroker(broker) as test_broker:
-		for event in events:
-			await test_broker.publish(
-				event,
-				topic=settings.NEW_MESSAGE_TOPIC,
-				key=b'chat-oid',
-			)
-
-	await container.close()
-	consumer_logger.removeHandler(capture)
-	return sink, capture
-
-
 async def _check_pipeline_duplicates() -> None:
 	# Одно и то же событие дважды в одном конвейере: ровно одно уведомление,
 	# второй доставке не соответствует ни одного HTTP-запроса.
 	requests_seen: list[str] = []
 	dedup = InMemoryEventDeduplicator()
 	metrics.reset()
-	sink, _capture = await _run_pipeline([VALID_EVENT, VALID_EVENT], dedup, requests_seen)
+	sink, _capture = await run_pipeline(
+		[VALID_EVENT, VALID_EVENT],
+		requests_seen=requests_seen,
+		dedup=dedup,
+	)
 	assert len(sink.notifications) == 1, sink.notifications
 	# get_chat_info + get_chat_listeners — только у первой доставки.
 	assert len(requests_seen) == 2, requests_seen
@@ -249,16 +142,23 @@ async def _check_pipeline_restart() -> None:
 	shared_dedup = InMemoryEventDeduplicator()
 	requests_seen: list[str] = []
 
-	requests_seen.clear()
 	metrics.reset()
-	sink, _capture = await _run_pipeline([VALID_EVENT], shared_dedup, requests_seen)
+	sink, _capture = await run_pipeline(
+		[VALID_EVENT],
+		requests_seen=requests_seen,
+		dedup=shared_dedup,
+	)
 	assert len(sink.notifications) == 1, sink.notifications
 	assert len(requests_seen) == 2, requests_seen
 	assert metrics.duplicate_events == 0, metrics.duplicate_events
 
 	requests_seen.clear()
 	metrics.reset()
-	sink, capture = await _run_pipeline([VALID_EVENT], shared_dedup, requests_seen)
+	sink, capture = await run_pipeline(
+		[VALID_EVENT],
+		requests_seen=requests_seen,
+		dedup=shared_dedup,
+	)
 	assert not sink.notifications, sink.notifications
 	assert not requests_seen, requests_seen
 	assert metrics.duplicate_events == 1, metrics.duplicate_events
