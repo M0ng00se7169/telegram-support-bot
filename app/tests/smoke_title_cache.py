@@ -376,6 +376,67 @@ async def _check_pipeline_survives_warmup_failure() -> None:
 	assert 'GET /chat/chat-oid/' in requests, requests
 
 
+async def _check_created_event_keeps_cache_warm() -> None:
+	# Событие создания чата попадает в кэш без перезапуска процесса:
+	# уведомление содержит заголовок из события, журнала HTTP — только
+	# listener'ы, запроса за информацией о чате нет (спека, тест 7).
+	requests: list[str] = []
+	metrics.reset()
+	sink, capture = await run_pipeline(
+		[VALID_EVENT],
+		requests_seen=requests,
+		lifecycle_events=[(get_settings().NEW_CHATS_TOPIC, CREATED_EVENT)],
+	)
+	assert len(sink.notifications) == 1, sink.notifications
+	_tg_chat_id, notification = sink.notifications[0]
+	assert notification.title == 'Fresh Title', notification.title
+	assert not capture.records, capture.records
+	assert requests == ['GET /chat/chat-oid/listeners/'], requests
+	assert metrics.broken_events == 0, metrics.broken_events
+
+
+async def _check_deleted_event_suppresses_notification() -> None:
+	# Событие удаления чата ставит tombstone: уведомление по несуществующему
+	# чату не отправляется, и пропуск идёт ДО HTTP — ни chat-info, ни
+	# listener'ами (спека, тест 9; билет, п. «удаление»).
+	requests: list[str] = []
+	metrics.reset()
+	sink, capture = await run_pipeline(
+		[VALID_EVENT],
+		requests_seen=requests,
+		lifecycle_events=[(get_settings().CHAT_DELETED_TOPIC, DELETED_EVENT)],
+	)
+	assert not sink.notifications, sink.notifications
+	assert not requests, requests
+	assert metrics.broken_events == 0, metrics.broken_events
+	# Пропуск виден в логе — не молчаливое исчезновение уведомления.
+	assert capture.records, 'suppressed notification must be logged'
+	messages = ' | '.join(record.getMessage() for record in capture.records)
+	assert 'Уведомление пропущено' in messages, messages
+	assert 'chat-oid' in messages, messages
+
+
+async def _check_broken_lifecycle_event_is_logged() -> None:
+	# Битое событие жизненного цикла не роняет consumer'а: лог с причиной,
+	# метка «битое», конвейер продолжает работать (п. «невалидный payload»).
+	requests: list[str] = []
+	metrics.reset()
+	broken = {key: value for key, value in CREATED_EVENT.items() if key != 'chat_title'}
+	sink, capture = await run_pipeline(
+		[VALID_EVENT],
+		requests_seen=requests,
+		lifecycle_events=[(get_settings().NEW_CHATS_TOPIC, broken)],
+	)
+	assert metrics.broken_events == 1, metrics.broken_events
+	assert capture.records, 'broken lifecycle event must be logged'
+	messages = ' | '.join(record.getMessage() for record in capture.records)
+	assert 'chat_title' in messages, messages
+	# Сообщение дошло несмотря на битое событие — заголовок добран read-through'ом.
+	assert len(sink.notifications) == 1, sink.notifications
+	_tg_chat_id, notification = sink.notifications[0]
+	assert notification.title == 'chat title', notification.title
+
+
 async def main() -> None:
 	_check_settings_defaults()
 	_check_chat_event_schemas()
@@ -387,6 +448,9 @@ async def main() -> None:
 	await _check_read_through_once()
 	await _check_hot_path_single_request()
 	await _check_pipeline_survives_warmup_failure()
+	await _check_created_event_keeps_cache_warm()
+	await _check_deleted_event_suppresses_notification()
+	await _check_broken_lifecycle_event_is_logged()
 
 	print('TITLE_CACHE_SMOKE_OK')
 

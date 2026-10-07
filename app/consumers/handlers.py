@@ -16,6 +16,10 @@ queue, поэтому consumer, падающий на плохом payload, пр
 как виденное (Event Deduplicator): повторная доставка того же `event_id`
 завершается без единого побочного эффекта — ни HTTP-запроса, ни отправки в
 Telegram, ни записи в Reply Registry.
+
+Тем же роутером подписаны события жизненного цикла чата (создание/удаление) —
+они поддерживают Chat Title Cache тёплым. Дедупликации они не требуют:
+`remember`/`forget` идемпотентны при at-least-once доставке.
 """
 
 from __future__ import annotations
@@ -31,6 +35,8 @@ from settings import get_settings
 
 from consumers.metrics import metrics
 from consumers.schemas import (
+    ChatDeletedEvent,
+    NewChatCreatedEvent,
     NewMessageEvent,
     ValidationError,
 )
@@ -111,6 +117,59 @@ async def new_message_subscription_handler(
 			tg_chat_id=listener.oid,
 			notification=notification,
 		)
+
+
+@router.subscriber(
+	settings.NEW_CHATS_TOPIC,
+	group_id=settings.CHAT_EVENTS_GROUP_ID,
+)
+@inject
+async def chat_created_subscription_handler(
+	raw_payload: dict,
+	cache: FromDishka[ChatTitleCache],
+) -> None:
+	# Валидация на границе — как у new-message: битое событие логируется
+	# с причиной и не пробрасывается, чтобы одна плохая строка не остановила
+	# подписку на события чатов.
+	try:
+		event = NewChatCreatedEvent.model_validate(raw_payload)
+	except ValidationError as error:
+		metrics.record_broken()
+		logger.warning(
+			'Битое событие chat-created отсеяно: event_id=%s причина=%s',
+			_extract_event_id(raw_payload),
+			_format_validation_reason(error),
+		)
+		return
+
+	# Дедупликации здесь нет нарочно: remember/forget идемпотентны при
+	# at-least-once — повторная доставка просто перезаписывает тот же
+	# заголовок, наружу побочных эффектов нет.
+	cache.remember(event.chat_oid, event.chat_title)
+
+
+@router.subscriber(
+	settings.CHAT_DELETED_TOPIC,
+	group_id=settings.CHAT_EVENTS_GROUP_ID,
+)
+@inject
+async def chat_deleted_subscription_handler(
+	raw_payload: dict,
+	cache: FromDishka[ChatTitleCache],
+) -> None:
+	try:
+		event = ChatDeletedEvent.model_validate(raw_payload)
+	except ValidationError as error:
+		metrics.record_broken()
+		logger.warning(
+			'Битое событие chat-deleted отсеяно: event_id=%s причина=%s',
+			_extract_event_id(raw_payload),
+			_format_validation_reason(error),
+		)
+		return
+
+	# См. комментарий выше: tombstone ставится идемпотентно, дедуп не нужна.
+	cache.forget(event.chat_oid)
 
 
 def _extract_event_id(raw_payload: object) -> str:

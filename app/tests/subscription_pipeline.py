@@ -147,6 +147,7 @@ async def run_pipeline(
 	requests_seen: list[str],
 	dedup: BaseEventDeduplicator | None = None,
 	reply_registry: BaseReplyRegistry | None = None,
+	lifecycle_events: list[tuple[str, dict]] | None = None,
 	before_publish: Callable[[AsyncContainer], Awaitable[None]] | None = None,
 	extra_providers: Sequence[Provider] = (),
 ) -> tuple[RecordingNotifier, LogCapture]:
@@ -160,6 +161,8 @@ async def run_pipeline(
 
 	Дополнительные ручки (билет 03, только добавлены — дефолты не меняют
 	поведения существующих смоуков):
+	* `lifecycle_events` — пары `(topic, payload)` событий жизненного цикла
+	  чата, публикуемые ДО сообщений (создание/удаление чата);
 	* `before_publish` — вызывается с контейнером после сборки и до публикации
 	  (например, прогрев Chat Title Cache: FastStream-хуки `run_pipeline`
 	  не запускает);
@@ -197,6 +200,14 @@ async def run_pipeline(
 	consumer_logger.setLevel(logging.WARNING)
 
 	async with TestKafkaBroker(broker) as test_broker:
+		# События жизненного цикла чата — раньше сообщений: конвейер обязан
+		# увидеть создание/удаление чата до первого уведомления о нём.
+		for topic, payload in lifecycle_events or ():
+			await test_broker.publish(
+				payload,
+				topic=topic,
+				key=str(payload.get('event_id', '')).encode(),
+			)
 		for event in events:
 			await test_broker.publish(
 				event,
