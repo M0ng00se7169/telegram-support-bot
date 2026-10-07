@@ -11,6 +11,11 @@
 queue, поэтому consumer, падающий на плохом payload, превращает одну плохую строку в
 остановку всего топика. Событие без надёжной идентичности отправлять нельзя —
 уведомление без адресата хуже, чем его отсутствие.
+
+Доставка событий at-least-once, поэтому сразу после валидации событие помечается
+как виденное (Event Deduplicator): повторная доставка того же `event_id`
+завершается без единого побочного эффекта — ни HTTP-запроса, ни отправки в
+Telegram, ни записи в Reply Registry.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from consumers.schemas import (
     NewMessageEvent,
     ValidationError,
 )
+from services.dedup import BaseEventDeduplicator
 from services.notifier import (
     BaseNotifier,
     NewMessageNotification,
@@ -48,6 +54,7 @@ async def new_message_subscription_handler(
 	raw_payload: dict,
 	directory: FromDishka[BaseChatDirectory],
 	notifier: FromDishka[BaseNotifier],
+	deduplicator: FromDishka[BaseEventDeduplicator],
 ) -> None:
 	# Валидация контракта — на границе, до любого побочного эффекта.
 	try:
@@ -58,6 +65,17 @@ async def new_message_subscription_handler(
 			'Битое событие new-message отсеяно: event_id=%s причина=%s',
 			_extract_event_id(raw_payload),
 			_format_validation_reason(error),
+		)
+		return
+
+	# Дедупликация — сразу после валидации и строго до любого побочного эффекта:
+	# до HTTP-запросов за chat info/listeners и до отправки в Telegram. Идентичность
+	# берётся из `event_id` в payload, а не из Kafka Key (ADR-0002).
+	if not await deduplicator.mark_seen(event.event_id):
+		metrics.record_duplicate()
+		logger.warning(
+			'Дубликат new-message отсеяно: event_id=%s',
+			event.event_id,
 		)
 		return
 
