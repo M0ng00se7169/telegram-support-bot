@@ -9,9 +9,15 @@ sink-уведомитель. Подключается смоуками посл�
 """
 
 import logging
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Sequence,
+)
 
 import httpx
 from dishka import (
+    AsyncContainer,
     make_async_container,
     provide,
     Provider,
@@ -141,6 +147,8 @@ async def run_pipeline(
 	requests_seen: list[str],
 	dedup: BaseEventDeduplicator | None = None,
 	reply_registry: BaseReplyRegistry | None = None,
+	before_publish: Callable[[AsyncContainer], Awaitable[None]] | None = None,
+	extra_providers: Sequence[Provider] = (),
 ) -> tuple[RecordingNotifier, LogCapture]:
 	"""Прогоняет payload'ы через настоящий конвейер подписки (без Kafka-сервера).
 
@@ -149,6 +157,15 @@ async def run_pipeline(
 	процесса. Сценариям, которым нужно общее состояние между прогонами (хранилище
 	дедупликации, Reply Registry), свои экземпляры передаются явно; по умолчанию
 	создаются свежие in-memory.
+
+	Дополнительные ручки (билет 03, только добавлены — дефолты не меняют
+	поведения существующих смоуков):
+	* `before_publish` — вызывается с контейнером после сборки и до публикации
+	  (например, прогрев Chat Title Cache: FastStream-хуки `run_pipeline`
+	  не запускает);
+	* `extra_providers` — провайдеры, добавляемые ПОСЛЕ общей оффлайн-подмены:
+	  в dishka поздний провайдер выигрывает, ими перекрывается транспорт
+	  (envelope для GET /chat/, инъекция сбоя прогрева и т.п.).
 	"""
 	settings = get_settings()
 	if dedup is None:
@@ -167,8 +184,12 @@ async def run_pipeline(
 		offline_provider(requests_seen, reply_registry=reply_registry),
 		deduplicator_override_provider(dedup),
 		notifier_override_provider(sink),
+		*extra_providers,
 	)
 	setup_dishka(container, app)
+
+	if before_publish is not None:
+		await before_publish(container)
 
 	capture = LogCapture()
 	consumer_logger = logging.getLogger('consumers.handlers')

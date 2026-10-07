@@ -35,6 +35,7 @@ os.environ.setdefault('TG_BOT_TOKEN', '123456:TEST-TOKEN')
 
 import asyncio  # noqa: E402
 import logging  # noqa: E402
+import uuid  # noqa: E402
 
 import httpx  # noqa: E402
 from dishka import (  # noqa: E402
@@ -49,9 +50,14 @@ from httpx import (  # noqa: E402
     Response,
 )
 from settings import get_settings  # noqa: E402
-from subscription_pipeline import LogCapture  # noqa: E402
+from subscription_pipeline import (  # noqa: E402
+    LogCapture,
+    run_pipeline,
+    VALID_EVENT,
+)
 
 from consumers.main import warm_title_cache  # noqa: E402
+from consumers.metrics import metrics  # noqa: E402
 from consumers.schemas import (  # noqa: E402
     ChatDeletedEvent,
     NewChatCreatedEvent,
@@ -301,6 +307,75 @@ async def _check_fallback_never_suppresses() -> None:
 		await container.close()
 
 
+async def _check_cold_start_notification() -> None:
+	# Холодный старт без прогрева: уведомление всё равно содержит заголовок —
+	# read-through добывает его одним запросом и кладёт в кэш.
+	requests: list[str] = []
+	metrics.reset()
+	sink, _capture = await run_pipeline([VALID_EVENT], requests_seen=requests)
+	assert len(sink.notifications) == 1, sink.notifications
+	_tg_chat_id, notification = sink.notifications[0]
+	assert notification.title == 'chat title', notification.title
+	assert requests == ['GET /chat/chat-oid/', 'GET /chat/chat-oid/listeners/'], requests
+
+
+async def _check_read_through_once() -> None:
+	# Промах кэша — точечный read-through: два сообщения в один чат дают
+	# ровно один GET /chat/{oid}/; второе сообщение живёт за счёт кэша.
+	requests: list[str] = []
+	metrics.reset()
+	second = {**VALID_EVENT, 'event_id': str(uuid.uuid4()), 'message_oid': 'm2'}
+	sink, _capture = await run_pipeline([VALID_EVENT, second], requests_seen=requests)
+	assert len(sink.notifications) == 2, sink.notifications
+	chat_info_requests = [entry for entry in requests if entry == 'GET /chat/chat-oid/']
+	assert len(chat_info_requests) == 1, requests
+	assert requests.count('GET /chat/chat-oid/listeners/') == 2, requests
+
+
+async def _check_hot_path_single_request() -> None:
+	# Тёплый кэш (прогрев на старте) + событие о сообщении = ровно один
+	# HTTP-запрос, за listener'ами; chat-info в журнале нет, заголовок —
+	# из прогретого списка.
+	requests: list[str] = []
+	metrics.reset()
+	sink, _capture = await run_pipeline(
+		[VALID_EVENT],
+		requests_seen=requests,
+		before_publish=warm_title_cache,
+		extra_providers=[_transport_provider(requests)],
+	)
+	assert len(sink.notifications) == 1, sink.notifications
+	_tg_chat_id, notification = sink.notifications[0]
+	assert notification.title == 'Warmed Title', notification.title
+	assert requests == ['GET /chat/', 'GET /chat/chat-oid/listeners/'], requests
+
+
+async def _check_pipeline_survives_warmup_failure() -> None:
+	# Спека, тест 10: прогрев падает 500-м — consumer всё равно принимает
+	# события и отправляет уведомление с заголовком, добытым по промаху.
+	requests: list[str] = []
+	capture = LogCapture()
+	title_cache_logger = logging.getLogger('services.title_cache')
+	title_cache_logger.addHandler(capture)
+	metrics.reset()
+	try:
+		sink, _capture = await run_pipeline(
+			[VALID_EVENT],
+			requests_seen=requests,
+			before_publish=warm_title_cache,
+			extra_providers=[_transport_provider(requests, chat_list_status=500)],
+		)
+	finally:
+		title_cache_logger.removeHandler(capture)
+
+	assert capture.records, 'warmup failure must be logged as warning'
+	assert len(sink.notifications) == 1, sink.notifications
+	_tg_chat_id, notification = sink.notifications[0]
+	assert notification.title == 'chat title', notification.title
+	assert 'GET /chat/' in requests, requests
+	assert 'GET /chat/chat-oid/' in requests, requests
+
+
 async def main() -> None:
 	_check_settings_defaults()
 	_check_chat_event_schemas()
@@ -308,6 +383,10 @@ async def main() -> None:
 	await _check_warmup_failure_is_not_fatal()
 	await _check_tombstone_and_remember()
 	await _check_fallback_never_suppresses()
+	await _check_cold_start_notification()
+	await _check_read_through_once()
+	await _check_hot_path_single_request()
+	await _check_pipeline_survives_warmup_failure()
 
 	print('TITLE_CACHE_SMOKE_OK')
 

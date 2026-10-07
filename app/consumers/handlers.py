@@ -36,9 +36,10 @@ from consumers.schemas import (
 )
 from services.dedup import BaseEventDeduplicator
 from services.notifier import (
-    BaseNotifier,
-    NewMessageNotification,
+	BaseNotifier,
+	NewMessageNotification,
 )
+from services.title_cache import ChatTitleCache
 from services.web import BaseChatDirectory
 
 
@@ -55,6 +56,7 @@ async def new_message_subscription_handler(
 	directory: FromDishka[BaseChatDirectory],
 	notifier: FromDishka[BaseNotifier],
 	deduplicator: FromDishka[BaseEventDeduplicator],
+	cache: FromDishka[ChatTitleCache],
 ) -> None:
 	# Валидация контракта — на границе, до любого побочного эффекта.
 	try:
@@ -85,13 +87,20 @@ async def new_message_subscription_handler(
 	# источник chat_oid — payload события.
 	chat_oid = event.chat_oid
 
-	# Заголовок чата достаётся отдельным запросом. Билет 03 карточки №5 заменит это
-	# на Chat Title Cache; пока — текущее поведение, чтобы смоуки не менялись.
-	chat_info = await directory.get_chat_info(chat_oid=chat_oid)
+	# Заголовок — из Chat Title Cache: тёплый кэш отдаёт его без HTTP, промах —
+	# точечный read-through с дозаписью. `None` означает tombstone (чат
+	# удалён): уведомление пропускается целиком, ДО запроса listener'ов.
+	title = await cache.get_title(chat_oid=chat_oid, directory=directory)
+	if title is None:
+		logger.warning('Уведомление пропущено: чат удалён, chat_oid=%s', chat_oid)
+		return
+
+	# Chat Listener'ы остаются в горячем пути: подписки меняются динамично,
+	# актуальность важнее кэша — на событие ровно один HTTP-запрос, за ними.
 	listeners = await directory.get_chat_listeners(chat_oid=chat_oid)
 	notification = NewMessageNotification(
 		chat_oid=chat_oid,
-		title=chat_info.title,
+		title=title,
 		text=event.message_text,
 	)
 
