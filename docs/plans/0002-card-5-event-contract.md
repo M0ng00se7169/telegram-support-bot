@@ -5,7 +5,7 @@
 - **Дата:** 2026-10-07
 - **Трекер:** локальный markdown (конфиг трекера в репозитории отсутствует; предыдущая спека карточки №3 опубликована тем же способом)
 - **Связанные ADR:** `0001-keep-bot-and-consumer-as-separate-processes`, `0002-new-message-chat-oid-comes-from-payload`, `0003-chat-directory-single-web-api-boundary`
-- **Термины:** `GLOSSARY.md` — *New-Message Event*, *Chat*, *Chat Listener*, *Reply Registry*, *Kafka Key*, *Composition Root*
+- **Термины:** `GLOSSARY.md` — *New-Message Event*, *Chat*, *Chat Listener*, *Reply Registry*, *Kafka Key*, *Composition Root*, *Event Deduplicator*, *Chat Title Cache*
 
 ---
 
