@@ -1,17 +1,42 @@
+"""Обработчик подписки new-message consumer'а (карточка №5).
+
+Типы и валидация происходят на границе процесса: обработчик берёт **сырой payload**
+(dict), валидирует его через `NewMessageEvent` и только потом передаёт
+типизированный объект в бизнес-логику. Внутри бизнес-кода типы уже достоверные —
+`event_id` это `UUID`, `occurred_at` — `datetime`, `chat_oid` — `str`.
+
+Битое событие не падает consumer'ом: ошибка валидации ловится на одном сообщении,
+считает метку «битое», логируется с `event_id` и причиной и **не пробрасывается
+наружу**. Основание: relay на сервере переотправляет неограниченно и без dead-letter
+queue, поэтому consumer, падающий на плохом payload, превращает одну плохую строку в
+остановку всего топика. Событие без надёжной идентичности отправлять нельзя —
+уведомление без адресата хуже, чем его отсутствие.
+"""
+
+from __future__ import annotations
+
+import logging
+
 from dishka.integrations.faststream import (
-	FromDishka,
-	inject,
+    FromDishka,
+    inject,
 )
 from faststream.kafka import KafkaRouter
 from settings import get_settings
 
-from consumers.schemas import NewChatMessageSchema
+from consumers.metrics import metrics
+from consumers.schemas import (
+    NewMessageEvent,
+    ValidationError,
+)
 from services.notifier import (
-	BaseNotifier,
-	NewMessageNotification,
+    BaseNotifier,
+    NewMessageNotification,
 )
 from services.web import BaseChatDirectory
 
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 router = KafkaRouter()
@@ -20,20 +45,34 @@ router = KafkaRouter()
 @router.subscriber(settings.NEW_MESSAGE_TOPIC, group_id=settings.KAFKA_GROUP_ID)
 @inject
 async def new_message_subscription_handler(
-	message: NewChatMessageSchema,
+	raw_payload: dict,
 	directory: FromDishka[BaseChatDirectory],
 	notifier: FromDishka[BaseNotifier],
-):
-	# Реальный продюсер кладёт в key event_id, а не chat_oid:
-	# единственный надёжный источник chat_oid — payload события.
-	chat_oid = message.chat_oid
+) -> None:
+	# Валидация контракта — на границе, до любого побочного эффекта.
+	try:
+		event = NewMessageEvent.model_validate(raw_payload)
+	except ValidationError as error:
+		metrics.record_broken()
+		logger.warning(
+			'Битое событие new-message отсеяно: event_id=%s причина=%s',
+			_extract_event_id(raw_payload),
+			_format_validation_reason(error),
+		)
+		return
 
-	listeners = await directory.get_chat_listeners(chat_oid=chat_oid)
+	# Реальный продюсер кладёт в key event_id, а не chat_oid: единственный надёжный
+	# источник chat_oid — payload события.
+	chat_oid = event.chat_oid
+
+	# Заголовок чата достаётся отдельным запросом. Билет 03 карточки №5 заменит это
+	# на Chat Title Cache; пока — текущее поведение, чтобы смоуки не менялись.
 	chat_info = await directory.get_chat_info(chat_oid=chat_oid)
+	listeners = await directory.get_chat_listeners(chat_oid=chat_oid)
 	notification = NewMessageNotification(
 		chat_oid=chat_oid,
 		title=chat_info.title,
-		text=message.message_text,
+		text=event.message_text,
 	)
 
 	for listener in listeners:
@@ -43,3 +82,25 @@ async def new_message_subscription_handler(
 			tg_chat_id=listener.oid,
 			notification=notification,
 		)
+
+
+def _extract_event_id(raw_payload: object) -> str:
+	"""Извлекает `event_id` из сырых данных для логирования битого события.
+
+	`event_id` может отсутствовать или иметь неверный тип — тогда идентификатор
+	неизвестен, и логирование отмечает это явно.
+	"""
+	if isinstance(raw_payload, dict):
+		event_id = raw_payload.get('event_id')
+		if event_id is not None:
+			return str(event_id)
+	return '<unknown>'
+
+
+def _format_validation_reason(error: ValidationError) -> str:
+	"""Формирует читаемую причину валидации: поле и тип ошибки."""
+	reasons = [
+		f'{".".join(str(part) for part in err["loc"])}: {err["msg"]}'
+		for err in error.errors()
+	]
+	return '; '.join(reasons)
