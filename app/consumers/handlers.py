@@ -70,8 +70,10 @@ async def new_message_subscription_handler(
 
 	# Дедупликация — сразу после валидации и строго до любого побочного эффекта:
 	# до HTTP-запросов за chat info/listeners и до отправки в Telegram. Идентичность
-	# берётся из `event_id` в payload, а не из Kafka Key (ADR-0002).
-	if not await deduplicator.mark_seen(event.event_id):
+	# берётся из `event_id` в payload, а не из Kafka Key (ADR-0002). Единственный
+	# вызов `mark_if_new` = проверка + пометка атомарно; is_new — «событие новое».
+	is_new = await deduplicator.mark_if_new(event.event_id)
+	if not is_new:
 		metrics.record_duplicate()
 		logger.warning(
 			'Дубликат new-message отсеяно: event_id=%s',

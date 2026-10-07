@@ -1,7 +1,7 @@
 """Offline smoke: Event Deduplicator (карточка №5, билет 02).
 
 Проверяется внешнее поведение дедупликации:
-- операция хранилища `mark_seen` атомарна: N конкурентных вызовов для одного
+- операция хранилища `mark_if_new` атомарна: N конкурентных вызовов для одного
   `event_id` дают ровно один признак «новое»;
 - Valkey-бэкенд ставит отметку одной командой `SET ... EX ... NX` с TTL
   (бэкенд пропускается с явным сообщением, если сервер недоступен);
@@ -45,7 +45,6 @@ from valkey.asyncio import Valkey  # noqa: E402
 from consumers.metrics import metrics  # noqa: E402
 from services.dedup import (  # noqa: E402
     EVENT_DEDUP_PREFIX,
-    EVENT_DEDUP_TTL,
     InMemoryEventDeduplicator,
     ValkeyEventDeduplicator,
 )
@@ -55,36 +54,36 @@ CONCURRENCY = 50
 
 
 def _check_settings_default() -> None:
-	# Кодовая константа и настройка по умолчанию — сутки (86400 секунд).
-	assert EVENT_DEDUP_TTL == 86400, EVENT_DEDUP_TTL
+	# Единственный источник дефолта — настройка: сутки (86400 секунд).
+	# Имена полей реализации (например, ключевой префикс) не проверяются.
 	assert get_settings().EVENT_DEDUP_TTL == 86400
-	assert EVENT_DEDUP_PREFIX == 'event-dedup:'
 
 
 async def _check_in_memory_backend() -> None:
 	dedup = InMemoryEventDeduplicator()
 	event_id = uuid.uuid4()
-	assert await dedup.mark_seen(event_id) is True, 'первое событие — новое'
-	assert await dedup.mark_seen(event_id) is False, 'повтор — дубликат'
+	assert await dedup.mark_if_new(event_id) is True, 'первое событие — новое'
+	assert await dedup.mark_if_new(event_id) is False, 'повтор — дубликат'
 	other = uuid.uuid4()
-	assert await dedup.mark_seen(other) is True, 'другой event_id независим'
+	assert await dedup.mark_if_new(other) is True, 'другой event_id независим'
 
 	# Уже виденное событие: все конкурентные участники получают False.
 	results = await asyncio.gather(
-		*(dedup.mark_seen(event_id) for _ in range(CONCURRENCY)),
+		*(dedup.mark_if_new(event_id) for _ in range(CONCURRENCY)),
 	)
 	assert not any(results), results
 
-	# Атомарность: N конкурентных mark_seen для одного нового event_id →
+	# Атомарность: N конкурентных mark_if_new для одного нового event_id →
 	# ровно один признак «новое» (хранилище, без Kafka).
 	fresh = uuid.uuid4()
 	results = await asyncio.gather(
-		*(dedup.mark_seen(fresh) for _ in range(CONCURRENCY)),
+		*(dedup.mark_if_new(fresh) for _ in range(CONCURRENCY)),
 	)
 	assert sum(results) == 1, results
 
 
 async def _check_valkey_backend() -> None:
+	settings = get_settings()
 	url = os.environ.get('VALKEY_URL', 'valkey://localhost:6379/0')
 	client = Valkey.from_url(url)
 	try:
@@ -94,21 +93,21 @@ async def _check_valkey_backend() -> None:
 			print(f'VALKEY_SKIP: {type(error).__name__}: {error}')
 			return
 
-		dedup = ValkeyEventDeduplicator(client=client, ttl=EVENT_DEDUP_TTL)
+		dedup = ValkeyEventDeduplicator(client=client, ttl=settings.EVENT_DEDUP_TTL)
 		event_id = uuid.uuid4()
 		other = uuid.uuid4()
 		try:
-			assert await dedup.mark_seen(event_id) is True, 'SET NX — новое'
-			assert await dedup.mark_seen(event_id) is False, 'ключ уже был'
+			assert await dedup.mark_if_new(event_id) is True, 'SET NX — новое'
+			assert await dedup.mark_if_new(event_id) is False, 'ключ уже был'
 
 			# TTL реально применён к ключу отметки.
 			key = EVENT_DEDUP_PREFIX + str(event_id)
 			ttl = await client.ttl(key)
-			assert 0 < ttl <= EVENT_DEDUP_TTL, ttl
+			assert 0 < ttl <= settings.EVENT_DEDUP_TTL, ttl
 
 			# Атомарность на сервере: конкурентные SET NX → ровно один True.
 			results = await asyncio.gather(
-				*(dedup.mark_seen(other) for _ in range(CONCURRENCY)),
+				*(dedup.mark_if_new(other) for _ in range(CONCURRENCY)),
 			)
 			assert sum(results) == 1, results
 		finally:

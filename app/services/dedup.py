@@ -1,42 +1,50 @@
 """Event Deduplicator: идемпотентность подписки new-message (карточка №5).
 
 Deep Module: скрывает протокол «пометить событие как виденное» за одной
-**атомарной** операцией `mark_seen` — признак «новое / уже видели» возвращается
+**атомарной** операцией `mark_if_new` — признак «новое / уже видели» возвращается
 тем же вызовом. Наивная пара «спросить → потом пометить» не принимается: два
 события, обрабатываемых одновременно, прошли бы проверку до того, как отметки
 друг друга появились.
 
 Идентичность — `event_id` из payload события (ADR-0002), не Kafka Key.
 Хранилище — Valkey: процессы раздельные (ADR-0001), общей памяти нет, а Valkey
-уже в стеке RouteRelay. TTL по умолчанию — сутки: переотправка outbox идёт на
-следующем проходе релея, так что сутки перекрывают штатный случай с запасом.
+уже в стеке RouteRelay. TTL задаётся настройкой `EVENT_DEDUP_TTL` и приходит
+в бэкенд через DI; дефолт (сутки — окно перекрытия переотправок outbox) живёт
+только в `settings`, в этом модуле он не дублируется.
 """
 
 from abc import (
-	ABC,
-	abstractmethod,
+    ABC,
+    abstractmethod,
 )
 from uuid import UUID
 
 from valkey.asyncio import Valkey
 
-EVENT_DEDUP_TTL = 24 * 60 * 60  # сутки: окно перекрытия переотправок, секунд
+
 EVENT_DEDUP_PREFIX = 'event-dedup:'
 
 
 class BaseEventDeduplicator(ABC):
+	"""Одна атомарная операция: пометить событие и сказать, было ли оно новым."""
+
 	@abstractmethod
-	async def mark_seen(self, event_id: UUID) -> bool: ...
+	async def mark_if_new(self, event_id: UUID) -> bool:
+		"""True — событие новое, отметка поставлена именно этим вызовом.
+
+		False — уже видели; проверка и пометка не разделяются на два вызова.
+		"""
+		...
 
 
 class ValkeyEventDeduplicator(BaseEventDeduplicator):
 	"""Valkey backend: один атомарный `SET key value EX ttl NX`."""
 
-	def __init__(self, client: Valkey, ttl: int = EVENT_DEDUP_TTL) -> None:
+	def __init__(self, client: Valkey, ttl: int) -> None:
 		self._client = client
 		self._ttl = ttl
 
-	async def mark_seen(self, event_id: UUID) -> bool:
+	async def mark_if_new(self, event_id: UUID) -> bool:
 		# `SET ... EX ... NX` выполняется атомарно на сервере: True — ключа не
 		# было (событие новое), None — ключ уже стоял (дубликат). Признак
 		# возвращается тем же вызовом, второго round-trip не требуется.
@@ -58,7 +66,7 @@ class InMemoryEventDeduplicator(BaseEventDeduplicator):
 	def __init__(self) -> None:
 		self._seen: set[UUID] = set()
 
-	async def mark_seen(self, event_id: UUID) -> bool:
+	async def mark_if_new(self, event_id: UUID) -> bool:
 		# Read-modify-write — одна синхронная ступень на event-loop'е, без
 		# await внутри: конкурентные вызовы сериализуются, ровно один True.
 		if event_id in self._seen:
