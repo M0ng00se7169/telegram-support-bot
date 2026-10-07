@@ -25,8 +25,11 @@ Chat Directory: кэш читает через него, а directory перед
 не отдаёт (жёсткое удаление без tombstone, транзиентный сбой) — возвращается
 сам `chat_oid` запасным заголовком: отсутствующий или устаревший заголовок
 никогда не является причиной не отправлять уведомление («молчание хуже
-неточности»). Новых типов исключений модуль не вводит (ADR-0004): сбой
-чтения поглощается и логируется предупреждением.
+неточности»). Новых типов исключений модуль не вводит (ADR-0004): граничные
+сбои — `WebApiError` Chat Directory (ADR-0003: потребитель обязан ловить
+ошибку границы Web API) и `ValidationError` парсинга DTO на 200-теле —
+поглощаются предупреждением, а прочие ошибки — баг и всплывают наружу,
+не подменяясь тихим фолбэком.
 
 Переименование чата не отслеживается: сервер не публикует такие события,
 заголовок в уведомлении может устареть — это принятый компромисс.
@@ -38,6 +41,9 @@ from dataclasses import (
 	field,
 )
 
+from pydantic import ValidationError
+
+from exceptions.web import WebApiError
 from services.web import BaseChatDirectory
 
 
@@ -52,15 +58,20 @@ class ChatTitleCache:
 	_deleted: set[str] = field(default_factory=set)
 
 	async def warm_up(self, directory: BaseChatDirectory) -> None:
-		"""Прогрев одним запросом за список чатов. Никогда не бросает.
+		"""Прогрев одним запросом за список чатов.
 
-		Сбой прогрева не должен блокировать подписку: consumer продолжает
-		принимать события, кэш доберёт значения read-through'ом по мере
-		надобности, поэтому исключение любого типа логируется и глотается.
+		Ловит только граничные сбои — `WebApiError` (ADR-0003: потребитель
+		обязан ловить ошибку границы Web API) и `ValidationError` парсинга
+		DTO на 200-теле: прогрев считается несостоявшимся, кэш доберёт
+		значения read-through'ом. Прочие ошибки — баг и всплывают: глушить
+		их значило бы подменять штатное поведение тихим (ADR-0004:
+		баг не маскируется). Страховка от любого падения — широкий хук
+		`warm_title_cache` в `consumers.main`: он гарантирует, что сбой
+		прогрева не блокирует подписку (билет 03, п. 11).
 		"""
 		try:
 			chats = await directory.get_all_chats()
-		except Exception as error:
+		except (WebApiError, ValidationError) as error:
 			logger.warning('Прогрев Chat Title Cache не удался: %s', error)
 			return
 		for chat in chats:
@@ -88,9 +99,12 @@ class ChatTitleCache:
 		"""Заголовок чата: из кэша, на промахе — точечным read-through'ом.
 
 		`None` — только для удалённого чата (tombstone): вызывающий пропускает
-		уведомление целиком, до HTTP. Любой сбой чтения (Web API не знает чат
-		или недоступен) возвращает `chat_oid` запасным заголовком и
-		предупреждением в лог: метод не бросает, уведомление не теряется.
+		уведомление целиком, до HTTP. Метод не бросает при граничных ошибках
+		Web API/парсинга — `WebApiError` (ADR-0003: потребитель обязан ловить
+		ошибку границы) и `ValidationError` DTO на 200-теле: они возвращают
+		`chat_oid` запасным заголовком с предупреждением в лог, уведомление
+		не теряется. Прочие ошибки — баг и должны всплыть (ADR-0004:
+		программная ошибка не маскируется под штатный фолбэк).
 		"""
 		if chat_oid in self._deleted:
 			return None
@@ -99,7 +113,7 @@ class ChatTitleCache:
 			return cached
 		try:
 			chat_info = await directory.get_chat_info(chat_oid=chat_oid)
-		except Exception as error:
+		except (WebApiError, ValidationError) as error:
 			logger.warning(
 				'Заголовок чата недоступен, беру chat_oid запасным: %s',
 				error,
