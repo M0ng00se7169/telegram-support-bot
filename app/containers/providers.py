@@ -10,7 +10,16 @@ from telegram import Bot
 from valkey.asyncio import ConnectionPool, Valkey
 
 from settings import ProjectSettings
+from services.dedup import (
+	BaseEventDeduplicator,
+	ValkeyEventDeduplicator,
+)
+from services.notifier import (
+	BaseNotifier,
+	TelegramNotifier,
+)
 from services.replies import BaseReplyRegistry, ValkeyReplyRegistry
+from services.title_cache import ChatTitleCache
 from services.web import (
 	BaseChatDirectory,
 	ChatDirectory,
@@ -49,6 +58,32 @@ class DefaultProvider(Provider):
 	@provide(scope=Scope.APP)
 	def get_reply_registry(self, pool: ConnectionPool) -> BaseReplyRegistry:
 		return ValkeyReplyRegistry(client=Valkey(connection_pool=pool))
+
+	@provide(scope=Scope.APP)
+	def get_event_deduplicator(
+		self,
+		pool: ConnectionPool,
+		settings: ProjectSettings,
+	) -> BaseEventDeduplicator:
+		return ValkeyEventDeduplicator(
+			client=Valkey(connection_pool=pool),
+			ttl=settings.EVENT_DEDUP_TTL,
+		)
+
+	# APP-скоуп без зависимостей: Chat Directory (REQUEST-скоуп) кэшу не нужен —
+	# directory передаётся аргументом в warm_up/get_title, поэтому скоупы не смешиваются.
+	@provide(scope=Scope.APP)
+	def get_title_cache(self) -> ChatTitleCache:
+		return ChatTitleCache()
+
+	# APP-скоуп: внутри Notifier'а живёт `Bot`, он тоже APP-скоуп.
+	@provide(scope=Scope.APP)
+	def get_notifier(
+		self,
+		bot: Bot,
+		reply_registry: BaseReplyRegistry,
+	) -> BaseNotifier:
+		return TelegramNotifier(bot=bot, reply_registry=reply_registry)
 
 	@provide(scope=Scope.REQUEST)
 	def get_chat_directory(

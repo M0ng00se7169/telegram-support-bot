@@ -3,7 +3,7 @@
 Runs the real Kafka subscriber end to end without any network:
 - faststream TestKafkaBroker replaces the Kafka connection;
 - httpx MockTransport serves canned API responses;
-- PTB Bot lifecycle hooks and send_message are stubbed.
+- an in-memory BaseNotifier records the consumer's business event.
 
 Run:  python tests/smoke_composition_root.py   (from the app/ directory)
 """
@@ -11,53 +11,48 @@ Run:  python tests/smoke_composition_root.py   (from the app/ directory)
 import sys
 from pathlib import Path
 
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import asyncio
+import asyncio  # noqa: E402
 
-import httpx
-import telegram
-
-_sent_messages = []
-
-
-async def _stub(self) -> None:  # noqa: ANN001
-	pass
-
-
-async def _fake_send(self, **kwargs):  # noqa: ANN001
-	# Real PTB sendMessage returns the delivered Message; the notifier uses
-	# message_id to register the pair in the reply registry (card #1).
-	_sent_messages.append(kwargs)
-	return telegram.Message(
-		message_id=len(_sent_messages),
-		date=None,
-		chat=telegram.Chat(id=1, type='private'),
-	)
-
-
-telegram.Bot.initialize = _stub
-telegram.Bot.shutdown = _stub
-telegram.Bot.send_message = _fake_send
-
+import httpx  # noqa: E402
 from dishka import (  # noqa: E402
-	Provider,
-	Scope,
-	make_async_container,
-	provide,
+    make_async_container,
+    provide,
+    Provider,
+    Scope,
 )
 from dishka.integrations.faststream import setup_dishka  # noqa: E402
 from faststream import FastStream  # noqa: E402
-from faststream.kafka import KafkaBroker, TestKafkaBroker  # noqa: E402
-from httpx import AsyncClient, MockTransport, Response  # noqa: E402
+from faststream.kafka import (  # noqa: E402
+    KafkaBroker,
+    TestKafkaBroker,
+)
+from httpx import (  # noqa: E402
+    AsyncClient,
+    MockTransport,
+    Response,
+)
+from notifier_fakes import (  # noqa: E402
+    assert_single_notification,
+    notifier_override_provider,
+    RecordingNotifier,
+)
+from settings import get_settings  # noqa: E402
 
 from consumers.handlers import router  # noqa: E402
 from containers.providers import DefaultProvider  # noqa: E402
-from services.replies import (  # noqa: E402
-	BaseReplyRegistry,
-	InMemoryReplyRegistry,
+from services.dedup import (  # noqa: E402
+    BaseEventDeduplicator,
+    InMemoryEventDeduplicator,
 )
-from settings import get_settings  # noqa: E402
+from services.notifier import NewMessageNotification  # noqa: E402
+from services.replies import (  # noqa: E402
+    BaseReplyRegistry,
+    InMemoryReplyRegistry,
+)
 
 
 class OfflineProvider(Provider):
@@ -66,6 +61,11 @@ class OfflineProvider(Provider):
 	@provide(scope=Scope.APP)
 	def get_reply_registry(self) -> BaseReplyRegistry:
 		return InMemoryReplyRegistry()
+
+	# Card #5, ticket 02: deduplicator rides the in-memory backend offline.
+	@provide(scope=Scope.APP)
+	def get_event_deduplicator(self) -> BaseEventDeduplicator:
+		return InMemoryEventDeduplicator()
 
 	@provide(scope=Scope.REQUEST)
 	def get_http_client(self) -> AsyncClient:
@@ -86,29 +86,42 @@ class OfflineProvider(Provider):
 
 async def main() -> None:
 	settings = get_settings()
+	sink = RecordingNotifier()
+
 	broker = KafkaBroker(settings.KAFKA_BROKER_URL)
 	broker.include_router(router=router)
 	app = FastStream(broker=broker)
 
-	container = make_async_container(DefaultProvider(), OfflineProvider())
+	container = make_async_container(
+		DefaultProvider(),
+		OfflineProvider(),
+		notifier_override_provider(sink),
+	)
 	setup_dishka(container, app)
 
 	async with TestKafkaBroker(broker) as test_broker:
 		await test_broker.publish(
 			{
-				'event_id': 'e1',
-				'occurred_at': '2026-10-06T00:00:00Z',
+				'event_id': '12345678-1234-5678-1234-567812345678',
+				'occurred_at': '2026-10-06T00:00:00',
 				'message_text': 'hello',
 				'message_oid': 'm1',
 				'chat_oid': 'chat-oid',
 			},
 			topic=settings.NEW_MESSAGE_TOPIC,
 			key=b'chat-oid',
-		)
+  )
 
-	assert len(_sent_messages) == 1, f'expected 1 message, sent {_sent_messages}'
-	assert _sent_messages[0]['chat_id'] == '42'
-	assert '<blockquote>hello</blockquote>' in _sent_messages[0]['text']
+	assert_single_notification(
+		sink,
+		expected_tg_chat_id='42',
+		expected_notification=NewMessageNotification(
+			chat_oid='chat-oid',
+			title='chat title',
+			text='hello',
+		),
+		context='composition-root consumer notification',
+	)
 	await container.close()
 	print('INJECTION_SMOKE_OK')
 
